@@ -280,7 +280,7 @@ await test("e: `record` (one-shot) with --storage-state completes and uploads th
   assert.equal(out.id, "testid", "record --json should print the uploaded public id");
   assert.ok(out.sizeBytes > 0, "a non-empty recording should have been uploaded");
   assert.ok(lastComplete, "the ingest pipeline's /complete must have been called");
-  assert.equal(lastComplete.sourcePlatform, "web", "the CLI's web capture reports sourcePlatform 'web'");
+  assert.equal(lastComplete.sourcePlatform, "cli", "the CLI's web capture reports sourcePlatform 'cli'");
 });
 
 await test("f: --storage-state with a missing file exits 2 before any browser launch", async () => {

@@ -66,13 +66,27 @@ import {
   startExtensionRecording,
   stopExtensionRecording,
 } from "./chromeExtensionCapture.js";
-import { browserLogin, shouldUseManualLogin, type BrowserLoginResult } from "./browserLogin.js";
+import { browserLogin, LOGIN_SCOPES, shouldUseManualLogin, type BrowserLoginResult } from "./browserLogin.js";
 import { openUrl } from "./openUrl.js";
 import { cmdContextImport } from "./context/importCmd.js";
 import { cmdContextRead } from "./context/readCmd.js";
 import { errorEnvelope } from "./context/errors.js";
 import { supportsWebp } from "./context/ffmpeg.js";
 import { renderProofFrames } from "./proofFrames.js";
+import {
+  cmdAnalytics,
+  cmdComment,
+  cmdComments,
+  cmdDelete,
+  cmdDiagnostics,
+  cmdFolders,
+  cmdInteractions,
+  cmdOrganize,
+  cmdShare,
+  cmdUpdate,
+  failure,
+  type LibraryDeps,
+} from "./library.js";
 import { waitForAgentContext } from "./agentReadiness.js";
 import {
   BridgeUnavailableError,
@@ -351,6 +365,20 @@ interface Recording {
 // Output helpers
 // ---------------------------------------------------------------------------
 
+/** The helpers library.ts commands need, bound to this invocation. */
+function libraryDeps(ctx: Ctx, json: boolean): LibraryDeps {
+  return {
+    apiUrl: ctx.apiUrl,
+    apiKey: ctx.apiKey,
+    version: VERSION,
+    json,
+    normalizeId: (input) => normalizeId(input, ctx),
+    die,
+    printJson,
+    color: c,
+  };
+}
+
 function printJson(data: unknown): void {
   process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
 }
@@ -435,6 +463,7 @@ ${c.bold("AUTH")}
   login --no-browser                Copy-code flow for SSH/headless: open the URL anywhere, paste the code back
   login --key <clipy_sk_live_…>     Skip the browser: store a key you pasted
   login --paste                     Prompt for a pasted key instead of the browser
+  login --allow-delete              Also allow \`clipy delete\` (permanent; off by default)
   logout                            Delete the stored key
   whoami                            Check which key is active and that it works
 
@@ -477,6 +506,43 @@ ${c.bold("RECORDINGS")}
   open <id>                         Open the share page in your browser
   wait <id> [--for transcript|summary|both] [--timeout <sec>]
                                     Block until processing artifacts are ready
+  upload <file> [--title <t>] [--type kind] [--access mode] [--note '12: text']…
+                                    Upload an existing WebM, MP4 or MOV file to
+                                    your library (needs "ingest"). --wait, --json
+
+${c.bold("MANAGE")} ${c.dim("(needs recordings:write; comments needs comments:read, comment comments:write, analytics analytics:read)")}
+  update <id> [--title <t>] [--description <d> | --clear-description]
+                                    Rename a recording or edit its description
+  share <id> [public|restricted|private]
+                                    Show or change who can open the share link
+  organize <id> [--folder <name|id> | --no-folder] [--tag <t>]… [--untag <t>]…
+                                    File into a folder and add or remove tags
+  folders [--create <name>]         List folders (with ids), or create one
+  comments <id> [--json]            The comment thread, with timestamps
+  comment <id> "<text>" [--at <sec> | --reply-to <comment-id>]
+                                    Comment at a moment, or reply, as you
+  analytics <id> [--range <days>]   Lifetime views, unique viewers, completion,
+                                    who watched (detail is Pro); --range sets
+                                    the days in the daily series
+  delete <id> --yes                 Permanently delete a recording. Needs a key
+                                    from \`clipy login --allow-delete\`
+
+${c.bold("BUG EVIDENCE")} ${c.dim("(captured by the Chrome extension's bug capture, or browsers Clipy drives)")}
+  diagnostics <id> [--errors] [--console] [--network] [--json]
+                                    Console logs, uncaught errors, network
+                                    requests and the browser/OS/viewport of a
+                                    recording. Alias: logs
+    --errors          Only what went wrong: console errors, exceptions, failed
+                      requests (combine with --console or --network to narrow)
+    --levels <l,…>    Console levels: debug, info, log, warn, error
+    --status <s>      Network status: 5xx, 4xx, 404, failed
+    --method/--host   Narrow network requests
+    --bodies <b>      Request/response bodies: none, errors, all
+    --limit/--after   Page through long captures (max 500 per page)
+  interactions <id> [--types click,dwell,…] [--from-ms N] [--to-ms N]
+                                    Clicks, scrolls, typing and pauses with
+                                    the element labels and frame evidence;
+                                    page with --cursor <nextCursor>
 
 ${c.bold("PROOF")} ${c.dim("(tool-neutral evidence; needs an ingest-scoped API key)")}
   proof --frame <png|jpg|webp> [--frame <image> ...]
@@ -679,7 +745,7 @@ with the "ingest" permission. Everything else is read-only.
 
 async function cmdLogin(
   ctx: Ctx,
-  opts: { key?: string; paste?: boolean; noBrowser?: boolean },
+  opts: { key?: string; paste?: boolean; noBrowser?: boolean; allowDelete?: boolean },
 ): Promise<void> {
   const keyFlag = opts.key?.trim() || "";
   // A pasted key, an explicit --paste, or a non-interactive stdout all take the
@@ -691,11 +757,15 @@ async function cmdLogin(
   // --no-browser, SSH sessions, and display-less Linux take the copy-code
   // flow: this machine can't receive the loopback redirect (or can't open a
   // browser at all), so the approval page shows a code to paste back here.
-  await loginWithBrowser(ctx, opts.noBrowser || shouldUseManualLogin());
+  await loginWithBrowser(
+    ctx,
+    opts.noBrowser || shouldUseManualLogin(),
+    opts.allowDelete ? [...LOGIN_SCOPES, "recordings:delete"] : undefined,
+  );
 }
 
 /** Browser-approve flow (the default): open clipy.online, approve, store. */
-async function loginWithBrowser(ctx: Ctx, manual: boolean): Promise<void> {
+async function loginWithBrowser(ctx: Ctx, manual: boolean, scopes?: string[]): Promise<void> {
   process.stderr.write(
     `${c.dim(manual ? "approve this device from a browser on any machine…" : "opening your browser to approve this device…")}\n`,
   );
@@ -705,6 +775,7 @@ async function loginWithBrowser(ctx: Ctx, manual: boolean): Promise<void> {
       apiUrl: ctx.apiUrl,
       log: (m) => process.stderr.write(`${m}\n`),
       manual,
+      scopes,
       promptCode: manual
         ? () => promptVisible("Paste the approval code shown in the browser: ")
         : undefined,
@@ -1849,17 +1920,19 @@ async function ingestPostJson(ctx: Ctx, path: string, payload: unknown): Promise
     }
     if (!res.ok) {
       const msg = (typeof body.error === "string" && body.error) || `Clipy API error ${res.status}`;
+      const code = typeof body.code === "string" ? body.code : undefined;
       if (res.status === 401) {
-        throw ingestError(`${msg}. Run \`clipy login\` with an ingest-scoped key.`, res.status);
+        throw ingestError(`${msg}. Run \`clipy login\` with an ingest-scoped key.`, res.status, code);
       }
       if (res.status === 403) {
         throw ingestError(
           `${msg}\nYour API key needs the "ingest" permission. Mint one at ` +
             `${ctx.apiUrl}/settings/api-keys (check "Record & upload").`,
           res.status,
+          code,
         );
       }
-      throw ingestError(msg, res.status);
+      throw ingestError(msg, res.status, code);
     }
     return body;
   }
@@ -1868,8 +1941,23 @@ async function ingestPostJson(ctx: Ctx, path: string, payload: unknown): Promise
 
 // Error with the HTTP status attached so callers can branch on it (e.g. the
 // best-effort read receipt treats owner-scope 404 as "not mine", not a failure).
-function ingestError(message: string, status: number): Error & { status: number } {
-  return Object.assign(new Error(message), { status });
+function ingestError(message: string, status: number, code?: string): Error & { status: number; code?: string } {
+  return Object.assign(new Error(message), { status, ...(code ? { code } : {}) });
+}
+
+/**
+ * Whether a failed /complete may have committed unseen: no HTTP response at
+ * all (network error, timeout), or a 502/504 from the gateway in front of the
+ * app. Every answer the route itself gives (503 access_mode_pending, a 500
+ * that marked the recording failed) is explicit and never a success.
+ */
+/** /complete answers that mean the recording exists or is being committed. */
+const PENDING_COMPLETION_CODES = new Set(["access_mode_pending", "queue_pending", "claim_pending"]);
+
+function completionWasAmbiguous(error: unknown): boolean {
+  const { status, code } = error as { status?: number; code?: string };
+  if (typeof status !== "number") return true;
+  return !code && (status === 502 || status === 504);
 }
 
 /** Upload one chunk as multipart/form-data, retrying transient 429/5xx. */
@@ -2384,6 +2472,10 @@ async function uploadVideoToClipy(
     sourceVersion?: string;
     /** v2 browser-diagnostics sidecar from a browser Clipy drove (session). */
     browserDiagnostics?: Record<string, unknown> | null;
+    /** Who can open the share link; omitted keeps the account default. */
+    accessMode?: "public" | "restricted" | "private";
+    /** True when `name` was chosen by a person, so auto-titling keeps it. */
+    nameIsUserProvided?: boolean;
     log: (m: string) => void;
   },
 ): Promise<UploadedRecording> {
@@ -2396,13 +2488,12 @@ async function uploadVideoToClipy(
   let publicId = "";
   try {
     // 1) initiate → uploadToken + the video row (createVideoRow so the share
-    //    link exists immediately). The existing CLI/raw-upload contract uses
-    //    sourcePlatform "web"; sourceVersion carries `cli-proof/*` provenance
-    //    until the backend grows provider-specific source metadata.
+    //    link exists immediately). Servers that predate "cli" store "web" and
+    //    the sourceVersion prefix (`cli/`, `cli-proof/`) still identifies us.
     const init = await ingestPostJson(ctx, "/api/videos/raw-upload/initiate", {
       recordingId,
       createVideoRow: true,
-      sourcePlatform: "web",
+      sourcePlatform: "cli",
       sourceVersion,
     });
     uploadToken = String(init.uploadToken ?? "");
@@ -2453,8 +2544,10 @@ async function uploadVideoToClipy(
       uploadToken,
       name: opts.name,
       description: opts.description,
-      sourcePlatform: "web",
+      sourcePlatform: "cli",
       sourceVersion,
+      ...(opts.accessMode ? { accessMode: opts.accessMode } : {}),
+      ...(opts.nameIsUserProvided && opts.name ? { nameIsUserProvided: true } : {}),
       ...(opts.recordingKind ? { recordingKind: opts.recordingKind } : {}),
       ...(opts.narration && (opts.narration.text || opts.narration.notes?.length)
         ? { narration: opts.narration }
@@ -2480,12 +2573,33 @@ async function uploadVideoToClipy(
   } catch (e) {
     // Best-effort: release the half-uploaded streaming session so it doesn't
     // sit as an orphan (the server also janitors orphans after 8 days).
+    // A /complete whose responses were all lost may still have committed;
+    // the server then refuses the abort with 409 already_attached, which
+    // proves the recording exists. Reporting failure would invite a duplicate.
+    // An explicit answer from the route (503 access_mode_pending, queue_pending,
+    // claim_pending) is not a success, but the recording exists: the error
+    // names it so the caller never uploads the file again.
+    // A coded pending answer already says the recording exists or is being
+    // committed: name it directly, without depending on an abort that could
+    // itself fail, and without aborting a commit still in flight.
+    const pendingCode = (e as { code?: string }).code;
+    if (publicId && pendingCode && PENDING_COMPLETION_CODES.has(pendingCode)) {
+      throw Object.assign(e as Error, { publicId });
+    }
+    let attached = false;
     if (uploadToken) {
       await ingestPostJson(ctx, "/api/videos/raw-upload/abort", { recordingId, uploadToken }).catch(
-        () => {},
+        (abortError: unknown) => {
+          attached = (abortError as { status?: number }).status === 409;
+        },
       );
     }
-    throw e;
+    if (publicId && attached) {
+      if (!completionWasAmbiguous(e)) throw Object.assign(e as Error, { publicId });
+      // otherwise fall through to the success result
+    } else {
+      throw e;
+    }
   }
   return {
     publicId,
@@ -2496,6 +2610,133 @@ async function uploadVideoToClipy(
     sizeBytes,
     container,
   };
+}
+
+// ---------------------------------------------------------------------------
+// upload: put an existing video file into the library. The same pipeline as
+// `proof --video`, but titled after the file and meant for ordinary videos
+// (a screen recording made elsewhere, a demo, a bug repro from a teammate).
+// ---------------------------------------------------------------------------
+
+async function cmdUpload(
+  ctx: Ctx,
+  file: string,
+  opts: {
+    name?: string;
+    description?: string;
+    recordingKind?: string;
+    notes: ParsedNote[];
+    accessMode?: string;
+    wait: boolean;
+    json: boolean;
+  },
+): Promise<void> {
+  const fail: (
+    code: string,
+    message: string,
+    remediation: string,
+    exitCode?: number,
+    partial?: Record<string, unknown> | null,
+  ) => never = (code, message, remediation, exitCode = 1, partial = null) =>
+    failure({ json: opts.json, die }, code, message, remediation, exitCode, partial);
+  if (!ctx.apiKey) {
+    fail("auth_required", "no API key", "Run `clipy login` to approve this device, or set CLIPY_API_KEY.");
+  }
+  const videoPath = resolve(file);
+  if (!existsSync(videoPath)) {
+    fail("source_unreadable", `no such file: ${videoPath}`, "Check the path; nothing was uploaded.");
+  }
+  let accessMode: "public" | "restricted" | "private" | undefined;
+  if (opts.accessMode !== undefined) {
+    if (!["public", "restricted", "private"].includes(opts.accessMode)) {
+      fail("usage_error", "--access must be public, restricted or private", "Fix the arguments.", 2);
+    }
+    accessMode = opts.accessMode as "public" | "restricted" | "private";
+  }
+  const log = (message: string) => {
+    if (!opts.json) process.stderr.write(`${message}\n`);
+  };
+  const title = opts.name ?? basename(videoPath, extname(videoPath));
+  let uploaded: UploadedRecording;
+  try {
+    const notes = resolveNarrationNotes(opts.notes, [0]).sort((a, b) => a.startMs - b.startMs);
+    uploaded = await uploadVideoToClipy(ctx, {
+      videoPath,
+      name: title,
+      nameIsUserProvided: opts.name !== undefined,
+      description: opts.description,
+      recordingKind: opts.recordingKind,
+      narration: notes.length > 0 ? { notes } : undefined,
+      accessMode,
+      sourceVersion: `cli/${VERSION}`,
+      log,
+    });
+  } catch (error) {
+    const message = (error as Error).message;
+    const status = (error as { status?: number }).status;
+    if (status === undefined && /not valid WebM or MP4|empty file|not a file/i.test(message)) {
+      fail("source_unreadable", message, "Upload a WebM, MP4 or MOV file; nothing was uploaded.");
+    }
+    const stranded = (error as { publicId?: string }).publicId;
+    if (stranded) {
+      const partial = { id: stranded, shareUrl: `${ctx.apiUrl}/video/${stranded}` };
+      if ((error as { code?: string }).code === "access_mode_pending") {
+        fail(
+          "sharing_not_applied",
+          `uploaded as ${stranded}, but the ${accessMode ?? "requested"} sharing could not be applied, so it may still be readable at the account's default access`,
+          `Do not upload again. Set the sharing on the existing recording: clipy share ${stranded} ${accessMode ?? "private"}`,
+          1,
+          partial,
+        );
+      }
+      fail(
+        "upload_unconfirmed",
+        `uploaded as ${stranded}, but the server did not confirm its completion: ${message}`,
+        `Do not upload again; the recording exists. Check it with: clipy show ${stranded}`,
+        1,
+        partial,
+      );
+    }
+    if (status === 401) fail("auth_required", message, "Run `clipy login` to set a new key, then retry.");
+    if (status === 429 || (status === 403 && /pro|allowance|recordings or|minutes/i.test(message))) {
+      fail("quota_exceeded", message, "Report the limit to the user and stop; retrying only burns it.");
+    }
+    if (status === 403) {
+      fail("wrong_scope", message, 'The key needs "ingest": run `clipy login` again, or create one at /settings/api-keys.');
+    }
+    fail("unknown", message, "Re-run once; if it fails again, report this output as a bug.");
+  }
+  // The recording exists from here on. A failed wait is a warning on a
+  // successful result, never a failure: a caller that saw a failure would
+  // upload the same file again and create a duplicate.
+  const warnings: Array<{ code: string; error: string; remediation: string }> = [];
+  if (opts.wait) {
+    const waitError = await waitForArtifactsSafely(ctx, uploaded.publicId);
+    if (waitError) {
+      warnings.push({
+        code: "wait_incomplete",
+        error: `uploaded, but waiting for processing failed: ${waitError}`,
+        remediation: `Do not upload again. Check progress with: clipy wait ${uploaded.publicId} --for both`,
+      });
+    }
+  }
+  if (opts.json) {
+    printJson({
+      ok: true,
+      id: uploaded.publicId,
+      shareUrl: uploaded.shareUrl,
+      contextUrl: uploaded.contextUrl,
+      sizeBytes: uploaded.sizeBytes,
+      container: uploaded.container,
+      warnings,
+    });
+    return;
+  }
+  process.stdout.write(`${c.green("✓")} uploaded: ${c.bold(uploaded.shareUrl)}\n`);
+  process.stdout.write(`${c.dim("agent context:")} ${uploaded.contextUrl}\n`);
+  for (const warning of warnings) {
+    process.stderr.write(`${c.yellow("warning:")} ${warning.error}\n  ${warning.remediation}\n`);
+  }
 }
 
 interface ProofOpts {
@@ -3322,6 +3563,39 @@ async function cmdRecord(ctx: Ctx, opts: RecordOpts): Promise<void> {
 }
 
 /** Poll until the transcript reaches a terminal state (or ~5 min elapse). */
+/**
+ * waitForArtifacts without the exits: returns null once the transcript is
+ * terminal (or the five-minute deadline passes, as waitForArtifacts does) and
+ * an error message instead of calling die(). For callers whose real work has
+ * already succeeded and must not be reported as failed.
+ */
+async function waitForArtifactsSafely(ctx: Ctx, publicId: string): Promise<string | null> {
+  const key = ctx.apiKey;
+  if (!key) return "no API key";
+  const url = `${ctx.apiUrl}/api/v1/recordings/${encodeURIComponent(publicId)}/transcript`;
+  const deadline = Date.now() + 300_000;
+  const terminal = new Set(["ready", "failed", "none"]);
+  for (;;) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${key}`, Accept: "application/json", "User-Agent": `clipy-cli/${VERSION}` },
+        signal: controller.signal,
+      });
+      if (!res.ok) return `HTTP ${res.status}`;
+      const body = (await res.json()) as Json;
+      if (terminal.has(String(body.status))) return null;
+    } catch (e) {
+      return (e as Error).name === "AbortError" ? "request timed out" : (e as Error).message;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+}
+
 async function waitForArtifacts(ctx: Ctx, publicId: string): Promise<void> {
   const pid = encodeURIComponent(publicId);
   const deadline = Date.now() + 300_000;
@@ -7184,7 +7458,7 @@ async function cmdAgents(
 // contract changes.
 // ---------------------------------------------------------------------------
 
-const GUIDE_SCHEMA_VERSION = 17;
+const GUIDE_SCHEMA_VERSION = 18;
 
 /** The stable machine-readable failure taxonomy carried in `--json` error
  *  envelopes. Codes are the contract; messages are not. Published through the
@@ -7204,13 +7478,19 @@ const GUIDE_ERROR_CODES: ReadonlyArray<{
   { code: "ffmpeg_missing", meaning: "ffmpeg/ffprobe is not installed or not on PATH", retryable: true, remediation: "brew install ffmpeg (macOS) / sudo apt install ffmpeg (Linux) / winget install Gyan.FFmpeg, then re-run the same command" },
   { code: "no_video_stream", meaning: "the file carries no decodable video track", retryable: false, remediation: "audio-only source — import transcript-only with --no-frames, or supply the real video file" },
   { code: "auth_required", meaning: "HTTP 401 — no API key, or the key is invalid/revoked", retryable: true, remediation: "run `clipy login` and WAIT for the user to approve the device in the browser it opens (`clipy login --no-browser` on headless hosts); retry only after login returns" },
-  { code: "wrong_scope", meaning: "HTTP 403 — the key is valid but lacks a required permission", retryable: false, remediation: "write paths need the 'ingest' scope — mint a key carrying it at /settings/api-keys; re-running with the same key cannot help" },
+  { code: "wrong_scope", meaning: "HTTP 403 — the key is valid but lacks a required permission", retryable: false, remediation: "the error names the missing scope: recording/upload needs 'ingest', update/share/organize need 'recordings:write', comments needs 'comments:read', comment needs 'comments:write', analytics needs 'analytics:read', delete needs 'recordings:delete' (clipy login --allow-delete). Mint a key carrying it at /settings/api-keys; re-running with the same key cannot help" },
   { code: "quota_exceeded", meaning: "HTTP 429 — the account hit a plan or rate limit", retryable: false, remediation: "report the quota to the user and STOP; a retry loop only burns the limit. Any local bundle already produced remains readable" },
   { code: "frames_upload_failed", meaning: "the transcript synced but the frames did not", retryable: true, remediation: "PARTIAL SUCCESS, not a failure — the document exists and is readable. Re-run the SAME import command later to complete it; never re-import from scratch" },
   { code: "server_unreachable", meaning: "the Clipy API could not be reached", retryable: true, remediation: "check `clipy doctor --json`'s api check; a local (non --sync) bundle is still complete and readable with `clipy context read`" },
   { code: "transcript_unreadable", meaning: "the --transcript file could not be parsed", retryable: false, remediation: "confirm it is a real .vtt/.srt/Clipy transcript JSON and not empty or an HTML error page; ask the user for the right file rather than guessing another path" },
   { code: "source_unreadable", meaning: "the local video file could not be opened or probed", retryable: false, remediation: "verify the path exists and is readable (unmounted volume, still downloading, wrong container) — not retryable until the file is" },
   { code: "content_conflict", meaning: "a different video already occupies that document", retryable: false, remediation: "do NOT overwrite — show the user both and let them choose; re-running unchanged conflicts again" },
+  { code: "usage_error", meaning: "the command's arguments are wrong or missing (exit 2)", retryable: false, remediation: "fix the arguments; this manifest lists every command's usage and flags" },
+  { code: "not_found", meaning: "HTTP 404: no recording or folder with that id or name in this account", retryable: false, remediation: "look the id up with `clipy list --json` (or the folder with `clipy folders --json`); ids from another account never resolve" },
+  { code: "invalid_request", meaning: "the API refused the request as sent (HTTP 400, 409 or 422)", retryable: false, remediation: "read `error`, change the request accordingly; re-running unchanged fails the same way" },
+  { code: "confirmation_required", meaning: "a permanent action (clipy delete) was run without --yes (exit 2)", retryable: false, remediation: "only if the user asked for that exact recording to be deleted, re-run with --yes" },
+  { code: "upload_unconfirmed", meaning: "the upload became a recording, but the server never confirmed its completion (still being committed or queued)", retryable: false, remediation: "do NOT upload again (that creates a duplicate); check the recording in partial.id with `clipy show <id>`" },
+  { code: "sharing_not_applied", meaning: "the upload became a recording, but the requested public/restricted/private sharing could not be applied", retryable: false, remediation: "do NOT upload again (that creates a duplicate); run the `clipy share <id> <mode>` in the remediation, using partial.id" },
   { code: "unknown", meaning: "an unclassified failure", retryable: true, remediation: "re-run once; if it repeats, hand the user the whole envelope as a bug report rather than improvising a workaround" },
 ];
 
@@ -7237,14 +7517,14 @@ function cmdGuide(json: boolean): void {
       stdout: "primary results (JSON when --json is set) — THE SOURCE OF TRUTH",
       stderr: "progress, warnings, and install disclosures; narration only, never part of the contract, never JSON. Do not parse it and do not infer success or failure from it.",
       errors:
-        "exit non-zero with a message on stderr prefixed 'error:'. Under --json, `context import` prints exactly ONE object on stdout either way: a failure is {ok:false, code, error, remediation, partial} — branch on `code` (stable, see errorCodes), never on `error` text; `remediation` is the next action, written to be run verbatim where possible; `partial` holds whatever survived (e.g. {bundlePath}) or null.",
+        "exit non-zero with a message on stderr prefixed 'error:'. Under --json, `context import` and the library commands (upload, update, share, organize, folders, comments, comment, analytics, delete, diagnostics, interactions) print exactly ONE object on stdout either way: a failure is {ok:false, code, error, remediation, partial} — branch on `code` (stable, see errorCodes), never on `error` text; `remediation` is the next action, written to be run verbatim where possible; `partial` holds whatever survived (e.g. {bundlePath}) or null.",
       success:
         "{ok:true, …} always carries a `warnings` array — empty when nothing went wrong. A PARTIAL success (transcript synced, frames missing) is ok:true with entries in `warnings`, each {code, error, remediation}, and exits 0. Read the warnings; do not read them as failure.",
       neverInventSuccess:
         "If no readable result was printed, the work did not happen. Never report an import, recording, or frame capture as done because the command appeared to run.",
     },
     env: [
-      { name: "CLIPY_API_KEY", description: "API key (clipy_sk_live_…) from clipy.online/settings/api-keys; write commands need the 'ingest' scope" },
+      { name: "CLIPY_API_KEY", description: "API key (clipy_sk_live_…) from clipy.online/settings/api-keys; record/upload/proof need 'ingest', update/share/organize need 'recordings:write', comments needs 'comments:read', comment needs 'comments:write', analytics needs 'analytics:read', delete needs 'recordings:delete'" },
       { name: "CLIPY_API_URL", description: "API base URL override (default https://clipy.online)" },
       { name: "CLIPY_DISABLE_CDP", description: "set to 1 to force session --expose-cdp off (a hard kill switch that wins over the flag)" },
       { name: "CLIPY_SESSION_FILE", description: "path to a session state file that mark/chapter/session stop|abort|status resolve FIRST (before the cwd hash). `session run` exports it to the child so a driver can mark from any cwd." },
@@ -7267,7 +7547,7 @@ function cmdGuide(json: boolean): void {
         "Say plainly: imported and readable, frames pending, and which timestamps are affected (the classifier already names them in the bundle's sufficiency report).",
     },
     commands: [
-      cmdDoc("login", "clipy login [--no-browser] [--key <key>] [--paste]", "Approve this device in the browser (default). --no-browser (auto-detected on SSH and display-less Linux) prints the approval URL to open on any device and prompts for the code it shows. --key/--paste store a pasted key (also the automatic path when stdout is not a TTY)", ["--no-browser", "--key <key>", "--paste"]),
+      cmdDoc("login", "clipy login [--no-browser] [--allow-delete] [--key <key>] [--paste]", "Approve this device in the browser (default). The approved key reads, organizes, comments and uploads; --allow-delete adds the permanent-delete permission. --no-browser (auto-detected on SSH and display-less Linux) prints the approval URL to open on any device and prompts for the code it shows. --key/--paste store a pasted key (also the automatic path when stdout is not a TTY)", ["--no-browser", "--key <key>", "--paste"]),
       cmdDoc("logout", "clipy logout", "Delete the stored key"),
       cmdDoc("whoami", "clipy whoami", "Check the active key"),
       cmdDoc("list", "clipy list [-n N] [--page P] [--status s,…] [--json]", "List recordings, newest first"),
@@ -7290,6 +7570,17 @@ function cmdGuide(json: boolean): void {
         ["--transcript", "--output", "--language", "--title", "--tag", "--folder", "--sync", "--no-frames", "--json"],
       ),
       cmdDoc("context read", "clipy context read <bundle-path>", "Print a local bundle's recording.arec to stdout — plain, unpaged, uncoloured, for an agent to read directly. It opens with a self-describing header (source, duration, classification, sufficiency, untrusted-content warning) before the [MM:SS] transcript sections, so the first screen tells you what the document is and where it is blind. For a SYNCED document read it over MCP instead: get_context_document for metadata+classification without the transcript, then read_context_document with startMs/endMs for just the span you need."),
+      cmdDoc("upload", "clipy upload <file> [--title t] [--description d] [--type kind] [--access public|restricted|private] [--note '12: text']… [--wait] [--json]", "Upload an existing WebM/MP4/MOV file to the library through the same pipeline as recordings (needs 'ingest'; counts toward the recording allowance). JSON: {ok:true, id, shareUrl, contextUrl, sizeBytes, container, warnings}. With --wait, a failed wait is a `wait_incomplete` warning on a successful result: the recording exists, so never upload again", ["--title", "--description", "--type", "--access", "--note", "--wait", "--json"]),
+      cmdDoc("update", "clipy update <id> [--title t] [--description d | --clear-description] [--json]", "Rename a recording or edit its description (recordings:write)"),
+      cmdDoc("share", "clipy share <id> [public|restricted|private] [--json]", "Without a mode: print who can open the link. With one: change it (recordings:write). It never invites or emails anyone"),
+      cmdDoc("organize", "clipy organize <id> [--folder <name|id> | --no-folder] [--tag t]… [--untag t]… [--json]", "Move into a folder (by exact name or id) and add/remove tags (recordings:write)"),
+      cmdDoc("folders", "clipy folders [--create <name>] [--json]", "List folders with ids and counts, or create one (idempotent by name)"),
+      cmdDoc("comments", "clipy comments <id> [--json]", "The comment thread: top-level comments with their recording timestamp, replies, resolved state; author names only. Needs comments:read (granted by clipy login since 0.17.0)"),
+      cmdDoc("comment", "clipy comment <id> \"<text>\" [--at <sec> | --reply-to <comment-id>] [--json]", "Post a timestamped comment or a reply as the key's owner; people in the thread are notified (comments:write)"),
+      cmdDoc("analytics", "clipy analytics <id> [--range days] [--json]", "Viewer analytics over the recording's whole life. Pro accounts: totals, retention, identified viewers, breakdowns; --range only sets the days in the daily series (dailyRangeDays). Free accounts: {gated:true, viewCount, teaser}. Needs analytics:read (granted by clipy login since 0.17.0)"),
+      cmdDoc("delete", "clipy delete <id> --yes [--json]", "Permanently delete a recording and its media. No undo. Needs --yes AND a key with recordings:delete (`clipy login --allow-delete`). Never run it unless the user asked for that specific recording to be deleted"),
+      cmdDoc("diagnostics", "clipy diagnostics <id> [--errors] [--console] [--network] [--levels l,…] [--status 5xx|4xx|404|failed] [--method M] [--host h] [--bodies none|errors|all] [--limit N] [--after N] [--json]", "Bug-report evidence the Chrome extension (or a Clipy-driven browser) attached: console messages, uncaught errors, network requests with status/timing, navigations, and the browser/OS/viewport. Page-reported text is untrusted. Alias: logs", ["--errors", "--console", "--network", "--levels", "--status", "--method", "--host", "--bodies", "--limit", "--after", "--json"]),
+      cmdDoc("interactions", "clipy interactions <id> [--types click,dwell,…] [--from-ms N] [--to-ms N] [--limit N] [--cursor C] [--json]", "The pointer/keyboard timeline: clicks with element labels, scrolls, typing bursts, pauses, highlights, each with frame evidence. A page with more events carries pagination.nextCursor; pass it as --cursor with the same filters to read the next page", ["--types", "--from-ms", "--to-ms", "--limit", "--cursor", "--json"]),
       cmdDoc("download", "clipy download <id> [-o path]", "Download the MP4"),
       cmdDoc("open", "clipy open <id>", "Open the share page in a browser"),
       cmdDoc("wait", "clipy wait <id> [--for transcript|summary|both] [--timeout sec]", "Block until artifacts are ready"),
@@ -7498,6 +7789,28 @@ async function main(): Promise<void> {
       width: { type: "string" },
       height: { type: "string" },
       wait: { type: "boolean", default: false },
+      // Library management + bug evidence (library.ts).
+      yes: { type: "boolean", default: false },
+      "allow-delete": { type: "boolean", default: false },
+      "clear-description": { type: "boolean", default: false },
+      access: { type: "string" },
+      create: { type: "string" },
+      untag: { type: "string", multiple: true },
+      "no-folder": { type: "boolean", default: false },
+      "reply-to": { type: "string" },
+      range: { type: "string" },
+      console: { type: "boolean", default: false },
+      network: { type: "boolean", default: false },
+      errors: { type: "boolean", default: false },
+      levels: { type: "string" },
+      method: { type: "string" },
+      host: { type: "string" },
+      bodies: { type: "string" },
+      after: { type: "string" },
+      types: { type: "string" },
+      "from-ms": { type: "string" },
+      "to-ms": { type: "string" },
+      cursor: { type: "string" },
       version: { type: "boolean", short: "v", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -7593,12 +7906,18 @@ async function main(): Promise<void> {
     "--mic/--no-system-audio: Linux screen recordings are silent for now (narrate with clipy mark); drop the audio flag";
   const macAuthGuard = "auth state (--storage-state/--user-data-dir/--cookie/--local-storage/--init-script) applies to headless web capture — --source mac-screen records the real, already-logged-in screen";
 
+  // Usage errors for the library commands honour --json like their API
+  // errors do: one {ok:false, code:"usage_error", …} object on stdout.
+  const usageFail: (message: string, exitCode?: number) => never = (message) =>
+    failure({ json, die }, "usage_error", message, "Fix the arguments; `clipy guide --json` lists every command's flags.", 2);
+
   switch (command) {
     case "login":
       await cmdLogin(ctx, {
         key: values.key as string | undefined,
         paste: Boolean(values.paste),
         noBrowser: Boolean(values["no-browser"]),
+        allowDelete: Boolean(values["allow-delete"]),
       });
       return;
     case "logout":
@@ -7711,6 +8030,129 @@ async function main(): Promise<void> {
       }
       if (!rest[0]) die("usage: clipy context <id|url> | clipy context import <url|file> | clipy context read <bundle-path>", 2);
       await cmdContext(ctx, rest[0]);
+      return;
+    }
+    case "upload": {
+      const file = rest[0] ?? (values.video as string | undefined);
+      if (!file) usageFail('usage: clipy upload <file.mp4|webm|mov> [--title "<t>"] [--type kind] [--access public|restricted|private] [--wait] [--json]', 2);
+      // Validated here, not by requireRecordingKind/parseNoteFlag, whose die()
+      // would print prose and break the one-object --json contract.
+      let uploadKind: string | undefined;
+      if (values.type) {
+        uploadKind = normalizeRecordingKind(String(values.type)) ?? undefined;
+        if (!uploadKind) {
+          usageFail(`--type "${String(values.type)}" is not a recording kind. Accepted: ${RECORDING_KINDS.join(", ")}`);
+        }
+      }
+      const uploadNotes = (values.note as string[] | undefined) ?? [];
+      const passNote = uploadNotes.find((note) => /^\s*pass\s*\d/i.test(note));
+      if (passNote !== undefined) {
+        usageFail(`--note "${passNote}": an uploaded file has no passes; use absolute times such as "12: text"`);
+      }
+      await cmdUpload(ctx, file, {
+        name: ((values.title as string | undefined) ?? (values.name as string | undefined))?.trim() || undefined,
+        description: (values.description as string | undefined)?.trim() || undefined,
+        recordingKind: uploadKind,
+        notes: uploadNotes.map(parseNoteFlag),
+        accessMode: values.access as string | undefined,
+        wait: Boolean(values.wait),
+        json,
+      });
+      return;
+    }
+    case "update":
+      if (!rest[0]) usageFail('usage: clipy update <id|url> [--title "<title>"] [--description "<text>" | --clear-description]', 2);
+      await cmdUpdate(libraryDeps(ctx, json), rest[0], {
+        title: (values.title as string | undefined) ?? (values.name as string | undefined),
+        description: values.description as string | undefined,
+        clearDescription: Boolean(values["clear-description"]),
+      });
+      return;
+    case "share":
+      if (!rest[0]) usageFail("usage: clipy share <id|url> [public|restricted|private]", 2);
+      await cmdShare(libraryDeps(ctx, json), rest[0], rest[1] ?? (values.access as string | undefined));
+      return;
+    case "organize":
+      if (!rest[0]) usageFail("usage: clipy organize <id|url> [--folder <name|id> | --no-folder] [--tag <t>]… [--untag <t>]…", 2);
+      await cmdOrganize(libraryDeps(ctx, json), rest[0], {
+        folder: values.folder as string | undefined,
+        noFolder: Boolean(values["no-folder"]),
+        addTags: (values.tag as string[] | undefined) ?? [],
+        removeTags: (values.untag as string[] | undefined) ?? [],
+      });
+      return;
+    case "folders":
+      await cmdFolders(libraryDeps(ctx, json), { create: values.create as string | undefined });
+      return;
+    case "delete":
+      if (!rest[0]) usageFail("usage: clipy delete <id|url> --yes", 2);
+      await cmdDelete(libraryDeps(ctx, json), rest[0], { yes: Boolean(values.yes) });
+      return;
+    case "comments":
+      if (!rest[0]) usageFail("usage: clipy comments <id|url> [--json]", 2);
+      await cmdComments(libraryDeps(ctx, json), rest[0]);
+      return;
+    case "comment": {
+      if (!rest[0]) usageFail('usage: clipy comment <id|url> "<text>" [--at <seconds> | --reply-to <comment-id>]', 2);
+      const at = values.at as string | undefined;
+      await cmdComment(libraryDeps(ctx, json), rest[0], rest.slice(1).join(" "), {
+        atSeconds:
+          at === undefined
+            ? undefined
+            : Number.isFinite(Number(at)) && Number(at) >= 0
+              ? Number(at)
+              : usageFail("--at must be a non-negative number of seconds"),
+        replyTo: values["reply-to"] as string | undefined,
+      });
+      return;
+    }
+    case "analytics": {
+      if (!rest[0]) usageFail("usage: clipy analytics <id|url> [--range <days>] [--json]", 2);
+      const range = values.range === undefined ? undefined : Number(values.range);
+      if (range !== undefined && (!Number.isInteger(range) || range < 1 || range > 365)) {
+        usageFail("--range must be a whole number of days from 1 to 365", 2);
+      }
+      await cmdAnalytics(libraryDeps(ctx, json), rest[0], { range });
+      return;
+    }
+    case "diagnostics":
+    case "logs": {
+      if (!rest[0]) usageFail("usage: clipy diagnostics <id|url> [--errors] [--console] [--network] [--levels warn,error] [--status 5xx|4xx|failed|404] [--method M] [--host h] [--json]", 2);
+      const optInt = (v: unknown, flag: string): number | undefined => {
+        if (v === undefined) return undefined;
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0) usageFail(`${flag} must be a whole number`, 2);
+        return n;
+      };
+      await cmdDiagnostics(libraryDeps(ctx, json), rest[0], {
+        console: Boolean(values.console),
+        network: Boolean(values.network),
+        errors: Boolean(values.errors),
+        levels: values.levels as string | undefined,
+        status: values.status as string | undefined,
+        method: values.method as string | undefined,
+        host: values.host as string | undefined,
+        bodies: values.bodies as string | undefined,
+        limit: optInt(values.limit, "--limit"),
+        after: optInt(values.after, "--after"),
+      });
+      return;
+    }
+    case "interactions": {
+      if (!rest[0]) usageFail("usage: clipy interactions <id|url> [--types click,dwell,…] [--from-ms N] [--to-ms N] [--limit N] [--cursor C] [--json]", 2);
+      const optMs = (v: unknown, flag: string): number | undefined => {
+        if (v === undefined) return undefined;
+        const n = Number(v);
+        if (!Number.isInteger(n) || n < 0) usageFail(`${flag} must be a whole number of milliseconds`, 2);
+        return n;
+      };
+      await cmdInteractions(libraryDeps(ctx, json), rest[0], {
+        types: values.types as string | undefined,
+        fromMs: optMs(values["from-ms"], "--from-ms"),
+        toMs: optMs(values["to-ms"], "--to-ms"),
+        limit: optMs(values.limit, "--limit"),
+        cursor: (values.cursor as string | undefined) || undefined,
+      });
       return;
     }
     case "download":

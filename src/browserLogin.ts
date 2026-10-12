@@ -65,7 +65,19 @@ export function shouldUseManualLogin(env: NodeJS.ProcessEnv = process.env): bool
   return false;
 }
 
-const DEFAULT_SCOPES = ["recordings:read", "ingest"];
+/**
+ * What a browser-approved CLI key carries by default: read, organize, read
+ * and post comments, viewer analytics, and record/upload. Deleting recordings is opt-in
+ * (`clipy login --allow-delete`) because it cannot be undone.
+ */
+export const LOGIN_SCOPES: readonly string[] = [
+  "recordings:read",
+  "recordings:write",
+  "comments:read",
+  "comments:write",
+  "analytics:read",
+  "ingest",
+];
 const DEFAULT_TIMEOUT_MS = 180_000;
 const EXCHANGE_TIMEOUT_MS = 20_000;
 
@@ -83,7 +95,7 @@ function openBrowser(url: string, log: (m: string) => void): void {
 
 export async function browserLogin(opts: BrowserLoginOptions): Promise<BrowserLoginResult> {
   const apiUrl = opts.apiUrl.replace(/\/+$/, "");
-  const scopes = opts.scopes && opts.scopes.length ? opts.scopes : DEFAULT_SCOPES;
+  const scopes = opts.scopes && opts.scopes.length ? opts.scopes : [...LOGIN_SCOPES];
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const log = opts.log ?? (() => {});
 
