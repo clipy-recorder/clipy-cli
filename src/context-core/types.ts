@@ -137,7 +137,7 @@ export interface ArecCompleteness {
 
 export interface ArecManifest {
   bundleVersion: 1;
-  arecVersion: '0.3-draft';
+  arecVersion: '1.3';
   title: string;
   source: ContextSource;
   durationMs: number;

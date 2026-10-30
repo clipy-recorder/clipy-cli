@@ -740,6 +740,10 @@ API, but with agent-native tools and inline key-moment frames
 ([source](https://github.com/manovagyanik1/clipy-mcp) ·
 [setup docs](https://clipy.online/docs/mcp)). `clipy mcp` is a shortcut that runs it.
 
+Who records what: MCP records the browser. This CLI records Mac windows, displays and the
+iOS Simulator (`--source mac-screen`) and Linux screens (`--source screen`, including a
+private virtual display). The Clipy Mac and Windows apps record everything else.
+
 Also: every **public** Clipy watch link is agent-readable without any install — append
 `.arec` to it (`https://clipy.online/video/<id>.arec`) and it serves actionable AREC
 Markdown. The legacy `.md` URL remains byte-identical. Details at
@@ -755,4 +759,4 @@ Markdown. The legacy `.md` URL remains byte-identical. Details at
 
 ## License
 
-MIT © [Codersera](https://codersera.com)
+MIT © Clipy

@@ -1,6 +1,6 @@
 /**
  * `clipy context import <youtube-url|loom-url|local-file>` — compiles a local
- * Clipy context bundle (AREC v0.3-draft) and optionally syncs it to the library.
+ * Clipy context bundle (AREC 1.3) and optionally syncs it to the library.
  *
  * Syncing is a TWO-PHASE protocol, and the split is deliberate: the server is
  * the classification brain. Phase 1 uploads the transcript bundle and the

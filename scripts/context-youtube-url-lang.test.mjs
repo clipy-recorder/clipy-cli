@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 /**
- * Two field bugs, both offline-testable because both are pure decisions:
+ * Three field bugs, all offline-testable because all are pure decisions:
  *  1. shell-escaped URLs (`watch\?v\=ID`) must normalise, never reach yt-dlp raw
  *  2. caption selection must fall back past en-only, preferring the video's
  *     ORIGINAL language over YouTube's auto-translations of it
+ *  3. on an auto-dubbed video, the speech track of the spoken language must
+ *     win over a dub and over a translation (RBreC9k03kQ, HTTP 429)
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +16,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const dist = join(here, "..", "dist", "context");
 const { parseYoutubeId, canonicalYoutubeUrl } = await import(pathToFileURL(join(dist, "youtubeUrl.js")));
-const { planCaptionAttempts } = await import(pathToFileURL(join(dist, "ytdlp.js")));
+const { planCaptionAttempts, describeCaptions } = await import(pathToFileURL(join(dist, "ytdlp.js")));
 
 // --- 1. URL normalisation --------------------------------------------------
 
@@ -69,6 +72,7 @@ assert.equal(hindi[0].flag, "--write-auto-subs");
 assert.equal(hindi[1].track, "en", "en is the second choice, not the first");
 assert.equal(hindi[1].source, "auto_captions_translated", "en here is a machine translation of Hindi");
 assert.equal(hindi[1].translatedFrom, "hi");
+assert.ok(!hindi.some((a) => a.track === "af"), "Afrikaans is not a fallback once Hindi speech has been tried");
 
 // Original identifiable only from the metadata language field (no -orig track).
 const viaMetaLang = planCaptionAttempts(meta({ language: "ja", autoCaptionLangs: ["en", "ja", "ko"] }));
@@ -80,6 +84,11 @@ const french = planCaptionAttempts(meta({ autoCaptionLangs: ["fr"] }));
 assert.equal(french.length, 1, "a single available language should produce a single attempt");
 assert.equal(french[0].language, "fr", "fr must be picked rather than failing on en");
 assert.equal(french[0].source, "auto_captions", "with no known original, fr is not assumed to be a translation");
+assert.equal(describeCaptions(french[0]), "fr, auto-generated; the video's original language is unknown");
+
+// With no speech track at all, whatever is listed is still the last resort.
+const noOrig = planCaptionAttempts(meta({ language: "ja", autoCaptionLangs: ["ko", "ja"] }));
+assert.deepEqual(noOrig.map((a) => a.track), ["ja", "ko"]);
 
 // Creator captions outrank auto captions, in any language.
 const creator = planCaptionAttempts(
@@ -103,6 +112,97 @@ assert.equal(explicit[0].translatedFrom, "hi");
 // A regional variant satisfies a base-code request.
 const regional = planCaptionAttempts(meta({ subtitleLangs: ["en-US"] }), "en");
 assert.equal(regional[0].track, "en-US");
+
+// --- 3. auto-dubbed videos ------------------------------------------------
+
+// The real RBreC9k03kQ track list (yt-dlp 2026.08.19): an English video with
+// YouTube auto-dubbing, so there is one -orig track per audio track, ar-orig
+// first, after ~150 plain translation tracks. yt-dlp's plain "en" there is
+// English translated from the Arabic dub, and was rate-limited; en-orig is
+// the English speech.
+const dubbedFixture = JSON.parse(readFileSync(join(here, "fixtures", "youtube-dubbed-RBreC9k03kQ.json"), "utf8"));
+const dubbedMeta = (over = {}) =>
+  meta({ language: dubbedFixture.language, autoCaptionLangs: dubbedFixture.autoCaptionLangs, ...over });
+
+const dubbed = planCaptionAttempts(dubbedMeta());
+assert.deepEqual(dubbed.map((a) => a.track), ["en-orig"],
+  "the English speech, and no other dub or translation once the original is known");
+assert.equal(dubbed[0].source, "auto_captions");
+assert.equal(describeCaptions(dubbed[0]), "en, auto-generated — video's original language");
+
+const dubbedExplicit = planCaptionAttempts(dubbedMeta(), "en");
+assert.equal(dubbedExplicit.length, 1);
+assert.equal(dubbedExplicit[0].track, "en-orig", "--language en must take the English speech, not a translation");
+assert.equal(dubbedExplicit[0].source, "auto_captions", "en-orig is not a translation from ar");
+
+// Asking for a dub gets that dub's speech, labelled as a translation.
+const dubbedArabic = planCaptionAttempts(dubbedMeta(), "ar");
+assert.equal(dubbedArabic[0].track, "ar-orig");
+assert.equal(describeCaptions(dubbedArabic[0]), "ar, auto-translated from en");
+
+// A plain track on a dubbed video mixes translations from every audio track,
+// so no source language may be named for it.
+const dubbedZulu = planCaptionAttempts(dubbedMeta(), "zu");
+assert.equal(dubbedZulu[0].track, "zu");
+assert.equal(dubbedZulu[0].source, "auto_captions_translated");
+assert.equal(dubbedZulu[0].translatedFrom, undefined);
+assert.equal(describeCaptions(dubbedZulu[0]), "zu, auto-translated");
+
+// Creator subtitles still win, and the original's comes first.
+const dubbedCreator = planCaptionAttempts(dubbedMeta({ subtitleLangs: ["ar", "en"] }));
+assert.equal(dubbedCreator[0].track, "en");
+assert.equal(dubbedCreator[0].source, "creator_captions");
+
+// Hebrew: yt-dlp reports the retired code iw, and he must find it too.
+const dubbedHebrew = planCaptionAttempts(dubbedMeta({ language: "iw" }));
+assert.equal(dubbedHebrew[0].track, "iw-orig");
+assert.equal(dubbedHebrew[0].source, "auto_captions");
+assert.equal(planCaptionAttempts(dubbedMeta({ language: "he" }))[0].track, "iw-orig");
+const hebrewCreator = planCaptionAttempts(
+  meta({ language: "iw", subtitleLangs: ["iw"], autoCaptionLangs: ["iw-orig", "iw", "en"] }),
+  "he",
+);
+assert.equal(hebrewCreator[0].track, "iw", "--language he must take the creator's iw subtitles");
+assert.equal(hebrewCreator[0].source, "creator_captions");
+
+// Several -orig tracks and no metadata language: no original can be claimed,
+// and en-orig may well be the original, so it is not called a dub either.
+const dubbedUnknown = planCaptionAttempts(dubbedMeta({ language: undefined }));
+assert.deepEqual(dubbedUnknown.map((a) => a.track), ["en-orig", "ar-orig"]);
+assert.ok(dubbedUnknown.every((a) => a.translatedFrom === undefined && a.originalUnknown === true));
+assert.equal(describeCaptions(dubbedUnknown[0]), "en, auto-generated; the video's original language is unknown");
+
+// A metadata language that names none of the dubs is not trusted either.
+const dubbedMismatch = planCaptionAttempts(dubbedMeta({ language: "sv" }));
+assert.ok(dubbedMismatch.every((a) => a.track.endsWith("-orig") && a.originalUnknown === true));
+
+// --- 4. regions and scripts ------------------------------------------------
+
+// A metadata language with a region still counts as the original.
+const usEnglish = planCaptionAttempts(meta({ language: "en-US", autoCaptionLangs: ["en", "es"] }));
+assert.equal(usEnglish[0].track, "en");
+assert.equal(usEnglish[0].source, "auto_captions", "en-US speech captioned as en is not a translation");
+const ptBR = planCaptionAttempts(meta({ language: "pt-BR", autoCaptionLangs: ["pt-BR"] }));
+assert.equal(ptBR[0].source, "auto_captions", "the original's own regional tag is the original");
+
+// But two different regions or scripts are a translation apart.
+const ptPT = planCaptionAttempts(meta({ language: "pt-BR", autoCaptionLangs: ["pt-PT"] }));
+assert.equal(ptPT[0].source, "auto_captions_translated");
+assert.equal(ptPT[0].translatedFrom, "pt-BR");
+
+// A requested region or script is honoured, not widened to the base -orig
+// track, and is a translation of a bare original.
+const hant = planCaptionAttempts(meta({ language: "zh", autoCaptionLangs: ["zh-orig", "zh-Hans", "zh-Hant"] }), "zh-Hant");
+assert.equal(hant[0].track, "zh-Hant");
+assert.equal(hant[0].source, "auto_captions_translated", "zh-Hant under a zh original is a translation");
+assert.equal(hant[0].translatedFrom, "zh");
+const ptExplicit = planCaptionAttempts(meta({ language: "pt", autoCaptionLangs: ["ab", "pt-orig", "pt", "pt-PT"] }), "pt-PT");
+assert.equal(ptExplicit[0].track, "pt-PT");
+assert.equal(ptExplicit[0].source, "auto_captions_translated", "pt-PT under a pt original is a translation");
+assert.equal(ptExplicit[0].translatedFrom, "pt");
+const enGB = planCaptionAttempts(meta({ language: "en", autoCaptionLangs: ["en-orig", "en", "en-GB"] }), "en-GB");
+assert.equal(enGB[0].track, "en-GB");
+assert.equal(enGB[0].source, "auto_captions_translated", "en-GB under an en original is a translation");
 
 // Nothing at all to try.
 assert.deepEqual(planCaptionAttempts(meta({})), [], "no caption tracks means no attempts");

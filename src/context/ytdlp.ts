@@ -235,14 +235,20 @@ export async function fetchVideoMeta(bin: string, url: string): Promise<YoutubeM
   };
 }
 
-export interface FetchedCaptions {
-  format: "json3" | "vtt";
-  text: string;
+/** Where a caption track's text came from. */
+export interface CaptionProvenance {
   source: "creator_captions" | "auto_captions" | "auto_captions_translated";
   /** The real language of the text, e.g. "hi" — never a track name like "hi-orig". */
   language: string;
-  /** Set only when the text is a machine translation. */
+  /** Set only when the text is a machine translation and its source is known. */
   translatedFrom?: string;
+  /** Speech captions on a video whose spoken language could not be identified. */
+  originalUnknown?: true;
+}
+
+export interface FetchedCaptions extends CaptionProvenance {
+  format: "json3" | "vtt";
+  text: string;
 }
 
 /** yt-dlp marks a video's own caption track with an -orig suffix. */
@@ -250,45 +256,123 @@ function baseLang(track: string): string {
   return track.replace(/-orig$/i, "");
 }
 
+function isOrig(track: string): boolean {
+  return /-orig$/i.test(track);
+}
+
+/** YouTube track names still use the retired ISO 639 codes. */
+const LEGACY_CODES: Record<string, string> = { iw: "he", in: "id", ji: "yi", jw: "jv" };
+
+function primaryLang(lang: string): string {
+  const p = baseLang(lang).toLowerCase().split("-")[0];
+  return LEGACY_CODES[p] ?? p;
+}
+
+/**
+ * "en-US" and "en-orig" are both English, but pt-BR and pt-PT, or zh-Hans and
+ * zh-Hant, are a translation apart: a bare code matches any region or script
+ * of its language, two specific tags must agree.
+ */
+function sameLang(a: string, b: string): boolean {
+  const x = baseLang(a).toLowerCase();
+  const y = baseLang(b).toLowerCase();
+  if (x === y) return true;
+  if (primaryLang(x) !== primaryLang(y)) return false;
+  return !x.includes("-") || !y.includes("-");
+}
+
+/**
+ * Whether an auto track is the original's own speech rather than a
+ * translation of it. YouTube's speech tracks use bare codes, so a regional
+ * track such as pt-PT under a pt original is a translation, while an en track
+ * under en-US metadata is not.
+ */
+function isSpeechOf(orig: string, track: string): boolean {
+  if (!sameLang(orig, track)) return false;
+  const t = baseLang(track).toLowerCase();
+  return isOrig(track) || !t.includes("-") || t === baseLang(orig).toLowerCase();
+}
+
+/**
+ * An auto-dubbed video lists one -orig track per audio track (RBreC9k03kQ has
+ * 21), and each of its plain tracks bundles translations from all of them, so
+ * on such a video a plain track's source language cannot be known.
+ */
+function isDubbed(meta: YoutubeMeta): boolean {
+  return meta.autoCaptionLangs.filter(isOrig).length > 1;
+}
+
 /**
  * The language the video was actually spoken in, if we can tell. The -orig
  * track name is the strongest signal (YouTube adds it precisely to distinguish
  * the source track from its ~200 auto-translations); the metadata `language`
  * field is the fallback.
+ *
+ * On a dubbed video the -orig tracks only say which dubs exist. The metadata
+ * language picks the spoken one; if it is missing or matches none of them, we
+ * claim nothing.
  */
 function originalLanguage(meta: YoutubeMeta): string | undefined {
-  const tagged = [...meta.subtitleLangs, ...meta.autoCaptionLangs].find((l) =>
-    /-orig$/i.test(l),
+  const tagged = [...meta.subtitleLangs, ...meta.autoCaptionLangs].filter(isOrig);
+  if (tagged.length <= 1) return tagged[0] ?? meta.language;
+  const spoken = meta.language;
+  return spoken ? tagged.find((l) => sameLang(l, spoken)) : undefined;
+}
+
+/**
+ * pickLang for auto-captions, preferring the language's own -orig track. On a
+ * dubbed video the plain track is a translation: for RBreC9k03kQ, yt-dlp's
+ * "en" downloads English translated from the Arabic dub, while "en-orig" is
+ * the English speech. Translations are also what YouTube rate-limits with
+ * HTTP 429. On an ordinary video the two are the same file. A requested region
+ * or script is honoured exactly.
+ */
+function pickAutoLang(available: string[], want: string): string | null {
+  if (baseLang(want).includes("-")) {
+    const exact = available.find((l) => l.toLowerCase() === want.toLowerCase());
+    if (exact) return exact;
+  }
+  return (
+    available.find((l) => isOrig(l) && !baseLang(l).includes("-") && sameLang(l, want)) ??
+    pickLang(available, want)
   );
-  return tagged ?? meta.language;
 }
 
 /**
  * Picks one caption track and downloads only that track. Creator captions beat
  * auto-captions; an exact language match beats a regional variant (en-US for
- * a request of `en`).
+ * a request of `en`), and he finds YouTube's iw.
  */
 function pickLang(available: string[], want: string): string | null {
   const lower = want.toLowerCase();
-  const base = lower.split("-")[0];
+  const lang = primaryLang(want);
   // YouTube advertises auto-TRANSLATED tracks for ~200 languages, so falling
   // back to "whatever is first" would silently hand back a machine translation
   // of the video into Abkhazian. Only the requested language counts.
   return (
     available.find((l) => l.toLowerCase() === lower) ??
-    available.find((l) => l.toLowerCase() === base) ??
-    available.find((l) => l.toLowerCase().startsWith(`${base}-`)) ??
+    available.find((l) => !l.includes("-") && primaryLang(l) === lang) ??
+    available.find((l) => primaryLang(l) === lang) ??
     null
   );
 }
 
-export interface CaptionAttempt {
+export interface CaptionAttempt extends CaptionProvenance {
   /** The track name to ask yt-dlp for — may carry the -orig suffix. */
   track: string;
-  source: "creator_captions" | "auto_captions" | "auto_captions_translated";
-  language: string;
-  translatedFrom?: string;
   flag: "--write-subs" | "--write-auto-subs";
+}
+
+/** Whether an auto track is speech or a translation, and of what. */
+function autoProvenance(
+  track: string,
+  orig: string | undefined,
+  dubbed: boolean,
+): Omit<CaptionProvenance, "language"> {
+  if (dubbed && !isOrig(track)) return { source: "auto_captions_translated" };
+  if (!orig) return { source: "auto_captions", originalUnknown: true };
+  if (isSpeechOf(orig, track)) return { source: "auto_captions" };
+  return { source: "auto_captions_translated", translatedFrom: baseLang(orig) };
 }
 
 /**
@@ -306,6 +390,7 @@ export function planCaptionAttempts(meta: YoutubeMeta, explicitLanguage?: string
   const attempts: CaptionAttempt[] = [];
   const seen = new Set<string>();
   const orig = originalLanguage(meta);
+  const dubbed = isDubbed(meta);
 
   const add = (
     track: string | null | undefined,
@@ -314,25 +399,16 @@ export function planCaptionAttempts(meta: YoutubeMeta, explicitLanguage?: string
     if (!track || seen.has(`${kind}:${track}`)) return;
     seen.add(`${kind}:${track}`);
     const language = baseLang(track);
-    const translated =
-      kind === "auto" && !!orig && baseLang(orig).toLowerCase() !== language.toLowerCase();
-    attempts.push({
-      track,
-      language,
-      source:
-        kind === "creator"
-          ? "creator_captions"
-          : translated
-            ? "auto_captions_translated"
-            : "auto_captions",
-      ...(translated ? { translatedFrom: baseLang(orig!) } : {}),
-      flag: kind === "creator" ? "--write-subs" : "--write-auto-subs",
-    });
+    attempts.push(
+      kind === "creator"
+        ? { track, language, source: "creator_captions", flag: "--write-subs" }
+        : { track, language, ...autoProvenance(track, orig, dubbed), flag: "--write-auto-subs" },
+    );
   };
 
   if (explicitLanguage) {
     add(pickLang(meta.subtitleLangs, explicitLanguage), "creator");
-    add(pickLang(meta.autoCaptionLangs, explicitLanguage), "auto");
+    add(pickAutoLang(meta.autoCaptionLangs, explicitLanguage), "auto");
     return attempts;
   }
 
@@ -340,21 +416,32 @@ export function planCaptionAttempts(meta: YoutubeMeta, explicitLanguage?: string
   add(orig ? pickLang(meta.subtitleLangs, orig) : null, "creator");
   add(meta.subtitleLangs[0], "creator");
 
-  // 3-5. Auto: original language, then English, then whatever exists.
-  add(orig ? pickLang(meta.autoCaptionLangs, orig) : null, "auto");
-  add(pickLang(meta.autoCaptionLangs, "en"), "auto");
-  add(meta.autoCaptionLangs[0], "auto");
+  // 3-4. Auto: original language, then English.
+  add(orig ? pickAutoLang(meta.autoCaptionLangs, orig) : null, "auto");
+  add(pickAutoLang(meta.autoCaptionLangs, "en"), "auto");
+  // 5. Last resort: any speech track, else whatever is listed. Not on a dubbed
+  // video whose original is known: every other track there is another dub or
+  // a translation, and failing with no_captions says more than an Arabic
+  // transcript of an English video.
+  if (!(dubbed && orig)) add(meta.autoCaptionLangs.find(isOrig) ?? meta.autoCaptionLangs[0], "auto");
 
   return attempts;
 }
 
 /** One human-readable phrase for a track's provenance. */
-export function describeCaptions(c: { source: FetchedCaptions["source"]; language: string; translatedFrom?: string }): string {
+export function describeCaptions(c: CaptionProvenance): string {
   if (c.source === "creator_captions") return `${c.language}, creator-provided`;
   if (c.source === "auto_captions_translated") {
-    return `${c.language}, auto-translated from ${c.translatedFrom}`;
+    return c.translatedFrom
+      ? `${c.language}, auto-translated from ${c.translatedFrom}`
+      : `${c.language}, auto-translated`;
   }
+  if (c.originalUnknown) return `${c.language}, auto-generated; the video's original language is unknown`;
   return `${c.language}, auto-generated — video's original language`;
+}
+
+function provenanceOf({ track: _track, flag: _flag, ...provenance }: CaptionAttempt): CaptionProvenance {
+  return provenance;
 }
 
 export async function fetchCaptions(
@@ -412,9 +499,7 @@ export async function fetchCaptions(
           return {
             format,
             text,
-            source: attempt.source,
-            language: attempt.language,
-            ...(attempt.translatedFrom ? { translatedFrom: attempt.translatedFrom } : {}),
+            ...provenanceOf(attempt),
           };
         } finally {
           rmSync(dir, { recursive: true, force: true });

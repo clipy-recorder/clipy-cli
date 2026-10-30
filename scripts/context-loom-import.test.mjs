@@ -195,10 +195,10 @@ function bundleFilesFor() {
     text: "first we open the dashboard",
   });
 
-  // The bundle is the same shape as every other one, warning and all.
+  // The bundle is the same shape as every other one: identity comment, then title.
   const bundle = join(dir, bundleFilesFor().at(-1));
   const md = readFileSync(join(bundle, "recording.arec"), "utf8");
-  assert.match(md, /NOTE FOR AI AGENTS/, "the untrusted-content warning must be present");
+  assert.match(md, /^<!-- arec\n[\s\S]*?-->\n\n# /, "the identity comment comes first, then the title");
   assert.match(md, /- Source: loom/);
   assert.match(md, /\[00:00\] first we open the dashboard/);
   for (const file of ["recording.arec", "recording.md", "manifest.json", "transcript.json"]) {
