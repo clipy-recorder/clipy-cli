@@ -1,7 +1,7 @@
 # @clipy/cli
 
 [![npm version](https://img.shields.io/npm/v/%40clipy%2Fcli)](https://www.npmjs.com/package/@clipy/cli)
-[![license: MIT](https://img.shields.io/npm/l/%40clipy%2Fcli)](https://github.com/manovagyanik1/clipy-cli/blob/main/LICENSE)
+[![license: MIT](https://img.shields.io/npm/l/%40clipy%2Fcli)](https://github.com/clipy-recorder/clipy-cli/blob/main/LICENSE)
 [![node >= 18](https://img.shields.io/node/v/%40clipy%2Fcli)](https://www.npmjs.com/package/@clipy/cli)
 
 The [Clipy](https://clipy.online) command line. List, search, and read your screen
@@ -737,7 +737,7 @@ Precedence: flag → env → stored config.
 If you're wiring Clipy into an MCP-capable agent (Claude Code, Cursor, Codex, …),
 use the [`@clipy/mcp`](https://www.npmjs.com/package/@clipy/mcp) server instead — same
 API, but with agent-native tools and inline key-moment frames
-([source](https://github.com/manovagyanik1/clipy-mcp) ·
+([source](https://github.com/clipy-recorder/clipy-mcp) ·
 [setup docs](https://clipy.online/docs/mcp)). `clipy mcp` is a shortcut that runs it.
 
 Who records what: MCP records the browser. This CLI records Mac windows, displays and the
@@ -753,7 +753,7 @@ Markdown. The legacy `.md` URL remains byte-identical. Details at
 
 - Website: [clipy.online](https://clipy.online) · [free online screen recorder](https://clipy.online/screen-recorder)
 - CLI docs: [clipy.online/docs/cli](https://clipy.online/docs/cli)
-- MCP server: [`@clipy/mcp`](https://www.npmjs.com/package/@clipy/mcp) · [docs](https://clipy.online/docs/mcp) · [source](https://github.com/manovagyanik1/clipy-mcp)
+- MCP server: [`@clipy/mcp`](https://www.npmjs.com/package/@clipy/mcp) · [docs](https://clipy.online/docs/mcp) · [source](https://github.com/clipy-recorder/clipy-mcp)
 - Free browser tools (converters, GIF makers, downloaders): [clipy.online/tools](https://clipy.online/tools)
 - API keys: [clipy.online/settings/api-keys](https://clipy.online/settings/api-keys)
 
