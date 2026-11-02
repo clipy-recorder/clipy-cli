@@ -86,7 +86,7 @@ function scopeRemedy(message: string): string {
   );
 }
 
-async function request(
+export async function request(
   deps: LibraryDeps,
   method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
   path: string,
@@ -154,7 +154,7 @@ async function request(
   return parsed;
 }
 
-function recordingPath(deps: LibraryDeps, id: string, sub = ""): { pid: string; path: string } {
+export function recordingPath(deps: LibraryDeps, id: string, sub = ""): { pid: string; path: string } {
   const pid = deps.normalizeId(id);
   return { pid, path: `/api/v1/recordings/${encodeURIComponent(pid)}${sub}` };
 }
@@ -180,7 +180,14 @@ function out(line = ""): void {
 export async function cmdUpdate(
   deps: LibraryDeps,
   id: string,
-  opts: { title?: string; description?: string; clearDescription?: boolean },
+  opts: {
+    title?: string;
+    description?: string;
+    clearDescription?: boolean;
+    /** What the recorder expected to happen (issue #741). */
+    expected?: string;
+    clearExpected?: boolean;
+  },
 ): Promise<void> {
   const patch: Json = {};
   if (opts.title !== undefined) {
@@ -189,8 +196,10 @@ export async function cmdUpdate(
   }
   if (opts.clearDescription) patch.description = null;
   else if (opts.description !== undefined) patch.description = opts.description;
+  if (opts.clearExpected) patch.expectedResult = null;
+  else if (opts.expected !== undefined) patch.expectedResult = opts.expected.trim() || null;
   if (Object.keys(patch).length === 0) {
-    usage(deps, 'usage: clipy update <id|url> [--title "<title>"] [--description "<text>" | --clear-description]');
+    usage(deps, 'usage: clipy update <id|url> [--title "<title>"] [--description "<text>" | --clear-description] [--expected "<text>" | --clear-expected]');
   }
   const { path } = recordingPath(deps, id);
   const body = await request(deps, "PATCH", path, patch);

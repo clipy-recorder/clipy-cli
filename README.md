@@ -118,6 +118,7 @@ clipy comment <id> "Fixed in #12" --at 65           # comment at 1:05 (or --repl
 clipy analytics <id>                                # views, unique viewers, who watched
 clipy diagnostics <id> --errors                     # console errors + failed requests
 clipy interactions <id> --types click,typing        # what was clicked, with element labels
+clipy recheck <id> --url <start-url>                # replay a recorded flow, report where it diverges
 clipy delete <id> --yes                             # permanent; needs clipy login --allow-delete
 clipy record --url <app> [--for 15]  # record a web app headlessly → a Clipy recording
 clipy session start --url <app>      # start recording in the background while you work
@@ -230,6 +231,53 @@ WebM or MP4 and does not require Playwright, Browser Use, Open Browser Use, or
 any other browser automation dependency. Captions and notes become timestamped
 agent narration; they are attestations from the driving agent, not claims
 independently verified by Clipy.
+
+## Re-check a recorded workflow
+
+Recorded workflows break silently when the app changes: an agent replays the old
+steps and clicks the wrong control. `clipy recheck` replays a recording's steps
+against today's UI in Chrome for Clipy and reports where it diverges.
+
+```bash
+clipy recheck 3kelcef8wo8h --plan                         # list the steps, no browser
+clipy recheck 3kelcef8wo8h --url https://staging.example.com/projects --json
+```
+
+It reads the recording's interaction timeline (clicks with their element labels,
+page navigations, scrolls, typing), its key moments and transcript, then drives
+Chrome for Clipy from `--url` through the same steps, in its own background
+window. After each step it saves a screenshot, and at the end it uploads them as
+one proof recording, so the report links a watch page and an `.arec` context
+document. `--no-upload` keeps everything local.
+
+Each step is one of: **matched**, **replayed** (scrolls, by direction),
+**control not found** (with the names of the controls that are there now),
+**different screen** (another route, or the control is covered; nothing is
+clicked), **error**, or **could not map step**. Clicks are replayed by their
+recorded label only, never by raw position, and typed values are never captured,
+so typing steps are always "could not map". The report says so rather than
+guessing.
+
+The replay clicks for real, in a browser that is signed in to your apps. A
+control whose name reads as irreversible (delete, pay, send, submit and similar)
+is not clicked and its step is "could not map" unless you pass
+`--allow-destructive`; use it only on a site where those actions are safe. A
+recorded page is opened directly only on the recording's own host, never on
+another host the recording names.
+
+`report.json` and `report.md` are written to `--out` (a temp folder by default).
+The JSON carries `summary.verdict` (`matches`, `diverged` or `incomplete`),
+`summary.firstDivergence`, every step's expected and observed state with the
+original key-moment frame URL and the new screenshot path, and the recording's
+expected result when it has one. `--fail-on-divergence` exits 4 unless the
+verdict is `matches`, for CI. Re-checking on another host than the recording
+(staging, localhost) checks the recorded paths on that host and never clicks on any other host.
+
+Requirements: Playwright (the same one `clipy session --source chrome-for-clipy`
+uses), Chrome for Clipy signed in wherever the workflow needs a login
+(`clipy chrome start`), and ffmpeg for the upload. Only recordings with click or
+navigation data can be re-checked: Chrome extension, Chrome for Clipy, Mac and
+Windows app takes.
 
 ## Record
 

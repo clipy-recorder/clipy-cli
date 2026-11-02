@@ -161,6 +161,8 @@ try {
     "Settings fix proof",
     "--type",
     "bug",
+    "--expected",
+    "  The save button is enabled after editing  ",
     "--json",
   ]);
   assert.equal(frames.code, 0, frames.stderr);
@@ -182,6 +184,7 @@ try {
 
   assert.equal(completes[0].name, "Settings fix proof");
   assert.equal(completes[0].recordingKind, "bug_report");
+  assert.equal(completes[0].expectedResult, "The save button is enabled after editing");
   assert.deepEqual(
     completes[0].narration.notes.map(({ startMs, text }) => ({ startMs, text })),
     [
@@ -209,6 +212,7 @@ try {
   assert.equal(chunkMediaTypes[1], "video/mp4");
   assert.equal(chunkFileBytes[1], 4096, "the chunk must carry only the bytes read, not the 4 MiB read buffer");
   assert.equal(completes[1].narration.notes[0].text, "agent opened the verified page");
+  assert.equal("expectedResult" in completes[1], false, "no --expected must leave the body unchanged");
 
   const bothSources = await run(["proof", "--frame", frame1, "--video", recordedMp4, "--json"]);
   assert.equal(bothSources.code, 2);

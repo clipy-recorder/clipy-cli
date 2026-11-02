@@ -782,7 +782,7 @@ const RECORDER_HTML = `<!doctype html>
  *  (measured on Chrome 154); a background Target.createTarget does not. With
  *  `newWindow` the tab gets its own background window, where it is the active,
  *  visible tab without anything being activated. */
-async function newBackgroundPage(browser: CfcBrowser, context: CfcContext, newWindow = false): Promise<CfcPage> {
+export async function newBackgroundPage(browser: CfcBrowser, context: CfcContext, newWindow = false): Promise<CfcPage> {
   const before = new Set(context.pages());
   const cdp = await browser.newBrowserCDPSession();
   let targetId: string | undefined;

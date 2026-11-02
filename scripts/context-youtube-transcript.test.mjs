@@ -23,7 +23,14 @@ mkdirSync(home);
 mkdirSync(binDir);
 
 const argvLog = join(dir, "yt-dlp-argv.log");
-const META = { id: "dQw4w9WgXcQ", title: "A caption-less video", duration: 12, subtitles: {}, automatic_captions: {} };
+const META = {
+  id: "dQw4w9WgXcQ",
+  title: "A caption-less video",
+  description: "Repo: https://github.com/example/demo\n\nInstall: pnpm add wrangler",
+  duration: 12,
+  subtitles: {},
+  automatic_captions: {},
+};
 
 const stub = join(binDir, "yt-dlp");
 writeFileSync(
@@ -118,6 +125,14 @@ assert.equal(manifest.source.kind, "youtube", "the source is still the YouTube v
 assert.equal(manifest.source.providerId, "dQw4w9WgXcQ");
 assert.equal(manifest.title, "A caption-less video", "YouTube metadata still supplies the title");
 assert.equal(manifest.durationMs, 12_000, "YouTube metadata still supplies the duration");
+assert.equal(
+  manifest.description,
+  "Repo: https://github.com/example/demo\n\nInstall: pnpm add wrangler",
+  "the video's description must reach the manifest",
+);
+const arec = readFileSync(join(out.bundlePath, "recording.arec"), "utf8");
+assert.ok(arec.includes("## Description"), "recording.arec must carry a Description section");
+assert.ok(arec.includes("> Install: pnpm add wrangler"), "the description lines must be quoted in recording.arec");
 
 const transcript = JSON.parse(readFileSync(join(out.bundlePath, "transcript.json"), "utf8"));
 assert.equal(transcript.segments.length, 2, "the bundle transcript did not come from the file");
@@ -125,6 +140,8 @@ assert.match(transcript.segments[0].text, /Hand written line one/);
 
 assert.equal(seen.create.transcript.segments.length, 2, "the uploaded transcript did not come from the file");
 assert.equal(seen.create.manifest.transcript.source, "user_file");
+assert.equal(seen.create.manifest.description, manifest.description, "the description must be uploaded with --sync");
+assert.ok(seen.create.arecMarkdown.includes("## Description"), "the uploaded AREC must carry the description");
 
 // The mangled input must have been rebuilt into the canonical URL.
 assert.equal(
@@ -159,4 +176,4 @@ assert.equal(
 
 server.close();
 
-process.stdout.write("✓ youtube import: --transcript wins over captions, URLs canonicalise, stub/id-less URLs refused\n");
+process.stdout.write("✓ youtube import: --transcript wins over captions, description kept, URLs canonicalise, stub/id-less URLs refused\n");

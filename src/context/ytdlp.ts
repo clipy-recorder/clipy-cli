@@ -195,6 +195,8 @@ export async function resolveYtDlp(notify: (msg: string) => void): Promise<strin
 export interface YoutubeMeta {
   id: string;
   title: string;
+  /** The video's description box, raw; normalized when the manifest is built. */
+  description?: string;
   durationMs: number;
   language?: string;
   /** Track names only — nothing here is trusted as a path or command. */
@@ -228,6 +230,7 @@ export async function fetchVideoMeta(bin: string, url: string): Promise<YoutubeM
   return {
     id: str(info.id) ?? "",
     title: str(info.title) ?? "Untitled video",
+    ...(str(info.description) ? { description: str(info.description) } : {}),
     durationMs: Number.isFinite(duration) && duration > 0 ? Math.round(duration * 1000) : 0,
     language: str(info.language),
     subtitleLangs: langKeys(info.subtitles),

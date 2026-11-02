@@ -14,7 +14,7 @@
  */
 
 import { parseArgs } from "node:util";
-import { appendFileSync, closeSync, copyFileSync, cpSync, createWriteStream, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
+import { appendFileSync, closeSync, copyFileSync, cpSync, createWriteStream, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -88,6 +88,8 @@ import {
   type LibraryDeps,
 } from "./library.js";
 import { waitForAgentContext } from "./agentReadiness.js";
+import { cmdRecheck, type RecheckDeps } from "./recheckCmd.js";
+import { RECHECK_MAX_STEPS } from "./recheck.js";
 import {
   BridgeUnavailableError,
   bridgeRequest,
@@ -379,6 +381,67 @@ function libraryDeps(ctx: Ctx, json: boolean): LibraryDeps {
   };
 }
 
+/** `clipy recheck`: the library helpers plus Playwright and the proof upload. */
+function recheckDeps(ctx: Ctx, json: boolean): RecheckDeps {
+  return {
+    ...libraryDeps(ctx, json),
+    loadChromium: async () => (await loadChromium()) as unknown as Awaited<ReturnType<RecheckDeps["loadChromium"]>>,
+    uploadFrames: (frames, meta) => uploadRecheckFrames(ctx, frames, meta),
+  };
+}
+
+/** The same path as `clipy proof --frame`: one held frame per step, the step
+ *  result as its timed caption. */
+async function uploadRecheckFrames(
+  ctx: Ctx,
+  frames: { path: string; caption: string }[],
+  meta: { name: string; description: string; log: (m: string) => void },
+): Promise<{ id: string; shareUrl: string; contextUrl: string }> {
+  requireKey(ctx);
+  const holdSeconds = 3;
+  // Private (mkdtemp is 0700): the video is made of screenshots of a
+  // signed-in app. Removed on success, failure and Ctrl-C alike.
+  const tmpDir = mkdtempSync(join(tmpdir(), "clipy-recheck-upload-"));
+  const onSignal = (signal: NodeJS.Signals) => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  try {
+    const videoPath = join(tmpDir, "recheck.mp4");
+    meta.log(`assembling ${frames.length} step frame${frames.length === 1 ? "" : "s"}…`);
+    await renderProofFrames({
+      framePaths: frames.map((f) => f.path),
+      outputPath: videoPath,
+      holdSeconds,
+      width: 1280,
+      height: 720,
+      notify: meta.log,
+    });
+    const notes: NarrationNote[] = frames.map((f, i) => ({
+      startMs: Math.round(i * holdSeconds * 1000),
+      endMs: Math.round((i + 1) * holdSeconds * 1000),
+      text: f.caption,
+    }));
+    const uploaded = await uploadVideoToClipy(ctx, {
+      videoPath,
+      name: meta.name,
+      nameIsUserProvided: true,
+      description: meta.description,
+      narration: { notes },
+      // The server maps the cli-proof/ prefix to the CLI source platform.
+      sourceVersion: `cli-proof/${VERSION}`,
+      log: meta.log,
+    });
+    return { id: uploaded.publicId, shareUrl: uploaded.shareUrl, contextUrl: uploaded.contextUrl };
+  } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 function printJson(data: unknown): void {
   process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
 }
@@ -511,7 +574,7 @@ ${c.bold("RECORDINGS")}
                                     your library (needs "ingest"). --wait, --json
 
 ${c.bold("MANAGE")} ${c.dim("(needs recordings:write; comments needs comments:read, comment comments:write, analytics analytics:read)")}
-  update <id> [--title <t>] [--description <d> | --clear-description]
+  update <id> [--title <t>] [--description <d> | --clear-description] [--expected <text>]
                                     Rename a recording or edit its description
   share <id> [public|restricted|private]
                                     Show or change who can open the share link
@@ -543,6 +606,14 @@ ${c.bold("BUG EVIDENCE")} ${c.dim("(captured by the Chrome extension's bug captu
                                     Clicks, scrolls, typing and pauses with
                                     the element labels and frame evidence;
                                     page with --cursor <nextCursor>
+  recheck <id> --url <start-url> [--plan] [--no-upload] [--out <dir>]
+                                    Replay a recorded workflow in Chrome for
+                                    Clipy and report each step: matched,
+                                    control not found, different screen, error
+                                    or could not map. --plan lists the steps only.
+                                    Irreversible-looking controls (delete, pay,
+                                    send) are not clicked without
+                                    --allow-destructive
 
 ${c.bold("PROOF")} ${c.dim("(tool-neutral evidence; needs an ingest-scoped API key)")}
   proof --frame <png|jpg|webp> [--frame <image> ...]
@@ -2469,6 +2540,8 @@ async function uploadVideoToClipy(
     description?: string;
     narration?: Narration;
     recordingKind?: string;
+    /** What the recorder expected to happen (--expected). Optional. */
+    expectedResult?: string;
     sourceVersion?: string;
     /** v2 browser-diagnostics sidecar from a browser Clipy drove (session). */
     browserDiagnostics?: Record<string, unknown> | null;
@@ -2549,6 +2622,7 @@ async function uploadVideoToClipy(
       ...(opts.accessMode ? { accessMode: opts.accessMode } : {}),
       ...(opts.nameIsUserProvided && opts.name ? { nameIsUserProvided: true } : {}),
       ...(opts.recordingKind ? { recordingKind: opts.recordingKind } : {}),
+      ...(opts.expectedResult ? { expectedResult: opts.expectedResult } : {}),
       ...(opts.narration && (opts.narration.text || opts.narration.notes?.length)
         ? { narration: opts.narration }
         : {}),
@@ -2625,6 +2699,8 @@ async function cmdUpload(
     name?: string;
     description?: string;
     recordingKind?: string;
+    /** What the recorder expected to happen (--expected). Optional. */
+    expectedResult?: string;
     notes: ParsedNote[];
     accessMode?: string;
     wait: boolean;
@@ -2666,6 +2742,7 @@ async function cmdUpload(
       nameIsUserProvided: opts.name !== undefined,
       description: opts.description,
       recordingKind: opts.recordingKind,
+      expectedResult: opts.expectedResult,
       narration: notes.length > 0 ? { notes } : undefined,
       accessMode,
       sourceVersion: `cli/${VERSION}`,
@@ -2749,6 +2826,8 @@ interface ProofOpts {
   name?: string;
   description?: string;
   recordingKind?: string;
+  /** What the recorder expected to happen (--expected). Optional. */
+  expectedResult?: string;
   notes: ParsedNote[];
   wait: boolean;
   json: boolean;
@@ -2835,6 +2914,7 @@ async function cmdProof(ctx: Ctx, opts: ProofOpts): Promise<void> {
       description: opts.description,
       narration: narrationNotes.length > 0 ? { notes: narrationNotes } : undefined,
       recordingKind: opts.recordingKind,
+      expectedResult: opts.expectedResult,
       sourceVersion: `cli-proof/${VERSION}`,
       log,
     });
@@ -3348,6 +3428,8 @@ interface RecordOpts {
   name?: string;
   description?: string;
   recordingKind?: string;
+  /** What the recorder expected to happen (--expected). Optional. */
+  expectedResult?: string;
   notes: ParsedNote[];
   viewports: ViewportSpec[] | null;
   width: number;
@@ -3521,6 +3603,7 @@ async function cmdRecord(ctx: Ctx, opts: RecordOpts): Promise<void> {
       name: opts.name,
       description: opts.description,
       recordingKind: opts.recordingKind,
+      expectedResult: opts.expectedResult,
       narration: notes.length ? { notes } : undefined,
       log,
     });
@@ -3672,6 +3755,8 @@ interface SessionState {
   name?: string;
   description?: string;
   recordingKind?: string;
+  /** What the recorder expected to happen (--expected). Optional. */
+  expectedResult?: string;
   maxSec: number;
   width: number;
   height: number;
@@ -4289,6 +4374,8 @@ async function cmdSessionStartLinux(
     name?: string;
     description?: string;
     recordingKind?: string;
+    /** What the recorder expected to happen (--expected). Optional. */
+    expectedResult?: string;
     maxSec: number;
     width: number;
     height: number;
@@ -4328,6 +4415,7 @@ async function cmdSessionStartLinux(
     name: opts.name,
     description: opts.description,
     recordingKind: opts.recordingKind,
+    expectedResult: opts.expectedResult,
     maxSec,
     width: opts.width,
     height: opts.height,
@@ -4407,6 +4495,8 @@ async function cmdRecordLinux(
     name?: string;
     description?: string;
     recordingKind?: string;
+    /** What the recorder expected to happen (--expected). Optional. */
+    expectedResult?: string;
     window?: string;
     display?: string;
     xDisplay?: string;
@@ -4474,6 +4564,7 @@ async function cmdRecordLinux(
         name: opts.name,
         description: opts.description,
         recordingKind: opts.recordingKind,
+        expectedResult: opts.expectedResult,
         narration: notes.length ? { notes } : undefined,
         log: (m) => {
           if (!opts.json) process.stderr.write(`${m}\n`);
@@ -4715,6 +4806,8 @@ async function cmdRecordMac(opts: {
   name?: string;
   description?: string;
   recordingKind?: string;
+  /** What the recorder expected to happen (--expected). Optional. */
+  expectedResult?: string;
   notes: ParsedNote[];
   window?: string;
   display?: string;
@@ -4759,6 +4852,13 @@ async function cmdRecordMac(opts: {
     log(
       c.yellow(
         `note: --type is not applied to --source mac-screen recordings yet (needs a Clipy app update)`,
+      ),
+    );
+  }
+  if (opts.expectedResult) {
+    log(
+      c.yellow(
+        `note: --expected is not applied to --source mac-screen recordings yet; run clipy update <id> --expected "<text>" afterwards`,
       ),
     );
   }
@@ -4975,6 +5075,8 @@ async function cmdSessionStartExtension(opts: {
   name?: string;
   tabAudio?: boolean;
   recordingKind?: string;
+  /** What the recorder expected to happen (--expected). Optional. */
+  expectedResult?: string;
   maxSec: number;
   json: boolean;
   userDataDir?: string;
@@ -4993,6 +5095,11 @@ async function cmdSessionStartExtension(opts: {
   }
   if (opts.recordingKind && !opts.json) {
     process.stderr.write(`${c.yellow("note: --type is not applied to --source chrome-extension recordings yet")}\n`);
+  }
+  if (opts.expectedResult && !opts.json) {
+    process.stderr.write(
+      `${c.yellow("note: --expected is not applied to --source chrome-extension recordings yet; after stop, run clipy update <id> --expected \"<text>\"")}\n`,
+    );
   }
   const file = sessionFilePath(process.cwd());
   const existing = readSessionState(file);
@@ -5096,6 +5203,8 @@ async function cmdSessionStart(
     name?: string;
     description?: string;
     recordingKind?: string;
+    /** What the recorder expected to happen (--expected). Optional. */
+    expectedResult?: string;
     maxSec: number;
     width: number;
     height: number;
@@ -5140,6 +5249,11 @@ async function cmdSessionStart(
     if (opts.recordingKind && !opts.json) {
       process.stderr.write(
         `${c.yellow("note: --type is not applied to --source mac-screen recordings yet (needs a Clipy app update)")}\n`,
+      );
+    }
+    if (opts.expectedResult && !opts.json) {
+      process.stderr.write(
+        `${c.yellow("note: --expected is not applied to --source mac-screen recordings yet; after stop, run clipy update <id> --expected \"<text>\"")}\n`,
       );
     }
     // Before the camera turns on, not after — see warnAudioUncontrollable().
@@ -5269,6 +5383,7 @@ async function cmdSessionStart(
     name: opts.name,
     description: opts.description,
     recordingKind: opts.recordingKind,
+    expectedResult: opts.expectedResult,
     maxSec,
     width: opts.width,
     height: opts.height,
@@ -6946,6 +7061,7 @@ async function runSessionDaemon(file: string): Promise<void> {
       name: state.name,
       description: state.description,
       recordingKind: state.recordingKind,
+      expectedResult: state.expectedResult,
       narration: notes.length ? { notes } : undefined,
       browserDiagnostics: diagnosticsSidecar,
       log: (m) => log(m.replace(/\x1b\[[0-9;]*m/g, "")),
@@ -7458,7 +7574,7 @@ async function cmdAgents(
 // contract changes.
 // ---------------------------------------------------------------------------
 
-const GUIDE_SCHEMA_VERSION = 18;
+const GUIDE_SCHEMA_VERSION = 19;
 
 /** The stable machine-readable failure taxonomy carried in `--json` error
  *  envelopes. Codes are the contract; messages are not. Published through the
@@ -7491,6 +7607,11 @@ const GUIDE_ERROR_CODES: ReadonlyArray<{
   { code: "confirmation_required", meaning: "a permanent action (clipy delete) was run without --yes (exit 2)", retryable: false, remediation: "only if the user asked for that exact recording to be deleted, re-run with --yes" },
   { code: "upload_unconfirmed", meaning: "the upload became a recording, but the server never confirmed its completion (still being committed or queued)", retryable: false, remediation: "do NOT upload again (that creates a duplicate); check the recording in partial.id with `clipy show <id>`" },
   { code: "sharing_not_applied", meaning: "the upload became a recording, but the requested public/restricted/private sharing could not be applied", retryable: false, remediation: "do NOT upload again (that creates a duplicate); run the `clipy share <id> <mode>` in the remediation, using partial.id" },
+  { code: "timeline_not_ready", meaning: "clipy recheck: the recording's interaction timeline is still being prepared", retryable: true, remediation: "wait a minute and re-run the same command" },
+  { code: "no_interactions", meaning: "clipy recheck: the recording has no clicks or page navigations to replay (for example a plain web-recorder take)", retryable: false, remediation: "only Chrome extension, Chrome for Clipy, Mac and Windows app takes can be re-checked; re-running cannot help" },
+  { code: "chrome_unavailable", meaning: "clipy recheck: Chrome for Clipy could not be started or driven", retryable: true, remediation: "run `clipy chrome status --json` and `clipy chrome start`, then re-run once" },
+  { code: "start_url_unreachable", meaning: "clipy recheck: the --url page could not be opened (connection refused, unknown host)", retryable: false, remediation: "check that --url loads (is the server running, is it the right host?), then re-run" },
+  { code: "recheck_upload_failed", meaning: "clipy recheck finished, but its step frames were not uploaded (a warning on an ok:true report, not a failure)", retryable: false, remediation: "the report and frames are saved locally (files.json); do not re-run the whole re-check just for the upload" },
   { code: "unknown", meaning: "an unclassified failure", retryable: true, remediation: "re-run once; if it repeats, hand the user the whole envelope as a bug report rather than improvising a workaround" },
 ];
 
@@ -7535,6 +7656,7 @@ function cmdGuide(json: boolean): void {
       { code: 1, meaning: "error" },
       { code: 2, meaning: "usage error" },
       { code: 3, meaning: "artifact not ready yet (transcript/summary/wait)" },
+      { code: 4, meaning: "clipy recheck --fail-on-divergence: the re-check finished but its verdict is not matches" },
     ],
     errorCodes: GUIDE_ERROR_CODES,
     partialSuccess: {
@@ -7570,8 +7692,8 @@ function cmdGuide(json: boolean): void {
         ["--transcript", "--output", "--language", "--title", "--tag", "--folder", "--sync", "--no-frames", "--json"],
       ),
       cmdDoc("context read", "clipy context read <bundle-path>", "Print a local bundle's recording.arec to stdout: plain, unpaged, uncoloured, for an agent to read directly. It opens with a self-describing header (source, duration, classification, sufficiency) before the [MM:SS] transcript sections, so the first screen tells you what the document is and where it is blind. For a SYNCED document read it over MCP instead: get_context_document for metadata+classification without the transcript, then read_context_document with startMs/endMs for just the span you need."),
-      cmdDoc("upload", "clipy upload <file> [--title t] [--description d] [--type kind] [--access public|restricted|private] [--note '12: text']… [--wait] [--json]", "Upload an existing WebM/MP4/MOV file to the library through the same pipeline as recordings (needs 'ingest'; counts toward the recording allowance). JSON: {ok:true, id, shareUrl, contextUrl, sizeBytes, container, warnings}. With --wait, a failed wait is a `wait_incomplete` warning on a successful result: the recording exists, so never upload again", ["--title", "--description", "--type", "--access", "--note", "--wait", "--json"]),
-      cmdDoc("update", "clipy update <id> [--title t] [--description d | --clear-description] [--json]", "Rename a recording or edit its description (recordings:write)"),
+      cmdDoc("upload", "clipy upload <file> [--title t] [--description d] [--type kind] [--expected text] [--access public|restricted|private] [--note '12: text']… [--wait] [--json]", "Upload an existing WebM/MP4/MOV file to the library through the same pipeline as recordings (needs 'ingest'; counts toward the recording allowance). JSON: {ok:true, id, shareUrl, contextUrl, sizeBytes, container, warnings}. With --wait, a failed wait is a `wait_incomplete` warning on a successful result: the recording exists, so never upload again. --expected states what should have happened; agents read it as the recording's Expected result", ["--title", "--description", "--type", "--expected", "--access", "--note", "--wait", "--json"]),
+      cmdDoc("update", "clipy update <id> [--title t] [--description d | --clear-description] [--expected text | --clear-expected] [--json]", "Rename a recording, edit its description, or set what should have happened (--expected, shown to agents as Expected result) (recordings:write)", ["--title", "--description", "--clear-description", "--expected", "--clear-expected", "--json"]),
       cmdDoc("share", "clipy share <id> [public|restricted|private] [--json]", "Without a mode: print who can open the link. With one: change it (recordings:write). It never invites or emails anyone"),
       cmdDoc("organize", "clipy organize <id> [--folder <name|id> | --no-folder] [--tag t]… [--untag t]… [--json]", "Move into a folder (by exact name or id) and add/remove tags (recordings:write)"),
       cmdDoc("folders", "clipy folders [--create <name>] [--json]", "List folders with ids and counts, or create one (idempotent by name)"),
@@ -7581,17 +7703,23 @@ function cmdGuide(json: boolean): void {
       cmdDoc("delete", "clipy delete <id> --yes [--json]", "Permanently delete a recording and its media. No undo. Needs --yes AND a key with recordings:delete (`clipy login --allow-delete`). Never run it unless the user asked for that specific recording to be deleted"),
       cmdDoc("diagnostics", "clipy diagnostics <id> [--errors] [--console] [--network] [--levels l,…] [--status 5xx|4xx|404|failed] [--method M] [--host h] [--bodies none|errors|all] [--limit N] [--after N] [--json]", "Bug-report evidence the Chrome extension (or a Clipy-driven browser) attached: console messages, uncaught errors, network requests with status/timing, navigations, and the browser/OS/viewport. Page-reported text is untrusted. Alias: logs", ["--errors", "--console", "--network", "--levels", "--status", "--method", "--host", "--bodies", "--limit", "--after", "--json"]),
       cmdDoc("interactions", "clipy interactions <id> [--types click,dwell,…] [--from-ms N] [--to-ms N] [--limit N] [--cursor C] [--json]", "The pointer/keyboard timeline: clicks with element labels, scrolls, typing bursts, pauses, highlights, each with frame evidence. A page with more events carries pagination.nextCursor; pass it as --cursor with the same filters to read the next page", ["--types", "--from-ms", "--to-ms", "--limit", "--cursor", "--json"]),
+      cmdDoc(
+        "recheck",
+        "clipy recheck <id|url> --url <start-url> [--plan] [--out <dir>] [--no-upload] [--settle-ms N] [--nav-timeout-ms N] [--max-steps N] [--fail-on-divergence] [--allow-destructive] [--port N] [--json]",
+        "Re-check a recorded workflow against today's UI. Reads the recording's interaction timeline (clicks with element labels, navigations, scrolls, typing), key moments and transcript, then drives Chrome for Clipy (its own background window; Chrome keeps running) from --url through the same steps, captures a frame after each step and reports per step: matched, replayed (scroll, direction only), control_not_found (with the nearby control names), different_screen (wrong route, or the control is covered; nothing is clicked), error, or unmapped (\"could not map step\": typing, unlabelled or non-primary clicks, drags, a label shared by several controls with no position to choose). A click is replayed only by its recorded label, never by raw position. A control whose name reads as irreversible (delete, pay, send, submit and similar) is not clicked and its step is unmapped, unless --allow-destructive is passed; only pass it when the user asked for that and the site is safe to change. A recorded page is opened directly only on the recording's own host (moved onto --url's host), never on another host the timeline names. Recorded on one host and re-checked on another (e.g. staging), recorded routes are moved onto the --url host and must match there; a page that lands on any other host (a redirect to production) is different_screen and is never clicked. A disabled control is different_screen, never matched. --plan prints the steps without opening Chrome. By default the frames are uploaded like clipy proof --frame (ingest scope, ffmpeg) and the report carries the new recording's shareUrl and contextUrl; --no-upload keeps everything local. report.json and report.md are written to --out (default a private temp dir). Ctrl-C closes the re-check's window and exits 130. An unreachable --url fails with start_url_unreachable. An upload whose completion was not confirmed carries the recording plus an upload_unconfirmed warning: do not upload again. --json prints {ok:true, type:'clipy.recheck_report', original:{…, expectedResult}, summary:{verdict: matches|diverged|incomplete, firstDivergence, counts}, steps:[{status, reason, expected, observed}], recording, limitations, warnings, files}. original.expectedResult carries the recording's \"what should have happened\" when it has one; compare it with the last frame yourself. --fail-on-divergence exits 4 unless the verdict is matches. Needs Playwright (as session --source chrome-for-clipy does) and a Chrome for Clipy that is signed in where the workflow needs it.",
+        ["--url <start-url>", "--plan", "--out <dir>", "--no-upload", "--settle-ms", "--nav-timeout-ms", "--max-steps", "--fail-on-divergence", "--allow-destructive", "--port", "--json"],
+      ),
       cmdDoc("download", "clipy download <id> [-o path]", "Download the MP4"),
       cmdDoc("open", "clipy open <id>", "Open the share page in a browser"),
       cmdDoc("wait", "clipy wait <id> [--for transcript|summary|both] [--timeout sec]", "Block until artifacts are ready"),
       cmdDoc(
         "proof",
-        "clipy proof (--frame <png|jpg|webp>… | --video <webm|mp4>) [--for <recording>] [--caption <text>…] [--hold sec] [--title t] [--type kind] [--note '3: text']… [--wait] [--json]",
+        "clipy proof (--frame <png|jpg|webp>… | --video <webm|mp4>) [--for <recording>] [--caption <text>…] [--hold sec] [--title t] [--type kind] [--expected text] [--note '3: text']… [--wait] [--json]",
         "Tool-neutral proof upload. --frame may be repeated to turn screenshots produced by any browser, computer-use, simulator, or test tool into one high-quality silent MP4; --caption must be omitted or repeated exactly once per frame and becomes timestamped agent narration. --hold controls each frame's duration (default 3s, 0.25–30; total cap 300s); --width/--height must be even integers from 320–3840 and default to 1280x720. Frame inputs are bounded to 50 MiB each and 250 MiB total. Screenshot stitching needs ffmpeg but does not need Playwright or a browser integration. --video uploads an already-recorded WebM or MP4 without re-encoding and needs no recording dependency. Exactly one source mode is required. --for <recording id|url> links the uploaded proof back to the recording it verifies (validated before upload; the link appears in the owner-only receipt on that recording's watch page and needs a key with both ingest and recordings:read). --json prints {id, shareUrl, contextUrl, sizeBytes, source, verifies?}; proof-video source reports only the detected container and never discloses the local path. Captions and notes are driver-attested narration, not Clipy-verified assertions.",
-        ["--frame", "--caption", "--video", "--for", "--hold", "--width", "--height", "--title", "--description", "--type", "--note", "--wait", "--json"],
+        ["--frame", "--caption", "--video", "--for", "--hold", "--width", "--height", "--title", "--description", "--type", "--expected", "--note", "--wait", "--json"],
       ),
-      cmdDoc("record", "clipy record --url <url> [--for sec] [--viewports list] [--title t] [--type kind] [--note '12: text']… [--storage-state f] [--cookie 'n=v']… [--local-storage 'k=v']… [--init-script f] [--wait] [--json]", "Headless one-shot capture of a web app; notes become the transcript. Notes are absolute ('12: text') or pass-scoped ('pass2: text' / 'pass2@5: text', anchored to a --viewports pass's real start; a malformed pass note is rejected). --type declares the recording kind (bug_report|feature_request|product_demo|walkthrough_tutorial|feedback_review|discussion_talk|other, plus aliases bug/feature/demo/walkthrough/feedback/discussion) so the AI summary reads it correctly. Auth (web capture only, applied before the first navigation so a logged-in SPA's route guard sees it): --storage-state <playwright storageState JSON path>, --cookie 'name=value[; Domain=d; Path=p; Secure; HttpOnly; SameSite=Lax]' (repeatable), --local-storage 'key=value' (repeatable, target origin only), --init-script <js file run before every page load>, --user-data-dir <dir> (launch from a persistent Chromium user-data ROOT with its whole logged-in identity; web only, mutually exclusive with --storage-state; refused if <dir> is a profile subdir — pass the root — or, in direct mode, a live-locked root via SingletonLock/Socket), --profile-directory <name> (with --user-data-dir: pick a NAMED profile like 'Profile 12' from chrome://version; Playwright can't select a profile in place, so Clipy COPIES it into a temp recording root and launches the copy — loudly disclosed, the real profile is never opened or written, and the copy is deleted after upload; no need to quit Chrome, though it warns if Chrome is running since in-use DBs may copy inconsistently). Auth boundary: --storage-state only seeds what the file contains; for cross-origin auth produce it with `npx playwright open --save-storage=auth.json <login-host>`, or use --user-data-dir + --profile-directory to record your real profile, or --source mac-screen --window Chrome. With --source screen (or mac-screen on macOS): records the real screen, via the Clipy Mac app on macOS (--type not yet applied on mac) and with the CLI's own X11 recorder on Linux (silent; needs ffmpeg with x11grab). Auth flags are rejected, since the screen is already logged in; --window '<title|app|id>' records that window by itself (windows on top of it stay out, and it follows the window if it moves, only when --json reports windowCapture \"window\"; \"area\", from a Clipy Mac app older than bridge protocol v3 or on ffmpeg older than 5.1, records whatever is on top, and on Linux covered parts are black without a compositor) and --display <id> records one display (ids from clipy sources). Linux only: --x-display :N picks the X display (default $DISPLAY) and --virtual-display records a private X display sized by --width/--height. --json prints {id, shareUrl, contextUrl, sizeBytes}", ["--for", "--viewports", "--title", "--description", "--type", "--note", "--storage-state", "--cookie", "--local-storage", "--init-script", "--user-data-dir", "--profile-directory", "--width", "--height", "--wait", "--source", "--window", "--display", "--x-display", "--virtual-display", "--json"]),
-      cmdDoc("session", "clipy session <start|run|stop|abort|status> [--url <url>] [--max sec] [--type kind] [--source web|screen|chrome-for-clipy|chrome-extension] [--window w] [--display d] [--x-display :N] [--virtual-display] [--expose-cdp] [--diagnostics off|errors|all] [--network-detail] [--storage-state f] [--cookie 'n=v']… [--local-storage 'k=v']… [--init-script f] [--json]", "Background recording session; auto-stops + uploads at --max (default 600s, cap 1800s). --type sets the recording kind (see record). Web and chrome-for-clipy sessions attach browser evidence read from the browser itself (console output, uncaught errors, failed requests including GraphQL errors, WebSocket activity, environment) as the recording's browser diagnostics: --diagnostics errors (default) keeps warnings/errors and failures, all keeps every message and request, off keeps none; --network-detail also keeps request/response headers and text bodies (cookie and authorization headers never leave the machine; the server redacts the rest by field name and value pattern). With --source screen (mac-screen on macOS), --window records that window by itself (windows on top of it stay out only when --json reports windowCapture \"window\"; \"area\", from a Clipy Mac app older than bridge protocol v3 or on ffmpeg older than 5.1, records whatever is on top, and on Linux covered parts are black without a compositor) and --display records one display; on Linux --x-display :N picks the X display and --virtual-display records a private X display whose name is returned as xDisplay (session run exports it to the command as DISPLAY). --source chrome-extension records ONE TAB through the Clipy extension inside Chrome for Clipy (needs a one-time clipy chrome setup): no daemon, the extension records and uploads; start returns cdpHttpUrl and the recorded tab's url (opened in the background, never focused), --name titles the recording, the tab's sound is left out unless --tab-audio (detected speech would replace the marks as the transcript), mark/chapter (plain or --observed/--verdict, not --assert-*) are kept by the CLI and sent at stop as the transcript, stop waits for the upload and returns the link. --source chrome-for-clipy records ONE TAB (tab video + tab audio, no picker or gesture) inside the persistent Chrome for Clipy instance: the instance is started automatically (sign in once via clipy chrome start and the profile stays signed in), the recorded tab opens at --url, its CDP endpoint is always published as cdpUrl/cdpHttpUrl so drivers attach to the very browser being recorded, and stopping the session leaves Chrome for Clipy running; auth-capture flags and --user-data-dir are rejected for this source. --expose-cdp (web sessions) opens a CDP endpoint (cdpUrl/cdpHttpUrl in the state file + session start/status output) so your own tools can drive the page while it records; OFF by default (any local process could attach), and CLIPY_DISABLE_CDP=1 forces it off. `session run [start flags] -- <command…>` starts a session, runs the command with inherited stdio (env CLIPY_SESSION=1, plus CLIPY_CDP_URL when --expose-cdp, plus CLIPY_TARGET_ID/CLIPY_PAGE_WS_URL for the recorded tab with --source chrome-extension), then GUARANTEES cleanup: exit 0 uploads, any non-zero exit or signal discards (session abort) and propagates the child's code. It is the crash-safe wrapper, so a dead driver never records dead air. Accepts the same auth flags as record (--storage-state/--user-data-dir/--profile-directory/--cookie/--local-storage/--init-script; web only, rejected on --source mac-screen). `session run` exports CLIPY_SESSION_FILE to the child so mark/chapter resolve the session from any cwd. --json is supported on start/stop/status (start returns cdpUrl/cdpHttpUrl)", ["run", "--url", "--max", "--type", "--source", "--window", "--display", "--x-display", "--virtual-display", "--tab-audio", "--expose-cdp", "--diagnostics", "--network-detail", "--storage-state", "--user-data-dir", "--profile-directory", "--cookie", "--local-storage", "--init-script", "--json"]),
+      cmdDoc("record", "clipy record --url <url> [--for sec] [--viewports list] [--title t] [--type kind] [--expected text] [--note '12: text']… [--storage-state f] [--cookie 'n=v']… [--local-storage 'k=v']… [--init-script f] [--wait] [--json]", "Headless one-shot capture of a web app; notes become the transcript. Notes are absolute ('12: text') or pass-scoped ('pass2: text' / 'pass2@5: text', anchored to a --viewports pass's real start; a malformed pass note is rejected). --type declares the recording kind (bug_report|feature_request|product_demo|walkthrough_tutorial|feedback_review|discussion_talk|other, plus aliases bug/feature/demo/walkthrough/feedback/discussion) so the AI summary reads it correctly. --expected states what should have happened (not yet applied on mac; use clipy update afterwards). Auth (web capture only, applied before the first navigation so a logged-in SPA's route guard sees it): --storage-state <playwright storageState JSON path>, --cookie 'name=value[; Domain=d; Path=p; Secure; HttpOnly; SameSite=Lax]' (repeatable), --local-storage 'key=value' (repeatable, target origin only), --init-script <js file run before every page load>, --user-data-dir <dir> (launch from a persistent Chromium user-data ROOT with its whole logged-in identity; web only, mutually exclusive with --storage-state; refused if <dir> is a profile subdir — pass the root — or, in direct mode, a live-locked root via SingletonLock/Socket), --profile-directory <name> (with --user-data-dir: pick a NAMED profile like 'Profile 12' from chrome://version; Playwright can't select a profile in place, so Clipy COPIES it into a temp recording root and launches the copy — loudly disclosed, the real profile is never opened or written, and the copy is deleted after upload; no need to quit Chrome, though it warns if Chrome is running since in-use DBs may copy inconsistently). Auth boundary: --storage-state only seeds what the file contains; for cross-origin auth produce it with `npx playwright open --save-storage=auth.json <login-host>`, or use --user-data-dir + --profile-directory to record your real profile, or --source mac-screen --window Chrome. With --source screen (or mac-screen on macOS): records the real screen, via the Clipy Mac app on macOS (--type not yet applied on mac) and with the CLI's own X11 recorder on Linux (silent; needs ffmpeg with x11grab). Auth flags are rejected, since the screen is already logged in; --window '<title|app|id>' records that window by itself (windows on top of it stay out, and it follows the window if it moves, only when --json reports windowCapture \"window\"; \"area\", from a Clipy Mac app older than bridge protocol v3 or on ffmpeg older than 5.1, records whatever is on top, and on Linux covered parts are black without a compositor) and --display <id> records one display (ids from clipy sources). Linux only: --x-display :N picks the X display (default $DISPLAY) and --virtual-display records a private X display sized by --width/--height. --json prints {id, shareUrl, contextUrl, sizeBytes}", ["--for", "--viewports", "--title", "--description", "--type", "--expected", "--note", "--storage-state", "--cookie", "--local-storage", "--init-script", "--user-data-dir", "--profile-directory", "--width", "--height", "--wait", "--source", "--window", "--display", "--x-display", "--virtual-display", "--json"]),
+      cmdDoc("session", "clipy session <start|run|stop|abort|status> [--url <url>] [--max sec] [--type kind] [--expected text] [--source web|screen|chrome-for-clipy|chrome-extension] [--window w] [--display d] [--x-display :N] [--virtual-display] [--expose-cdp] [--diagnostics off|errors|all] [--network-detail] [--storage-state f] [--cookie 'n=v']… [--local-storage 'k=v']… [--init-script f] [--json]", "Background recording session; auto-stops + uploads at --max (default 600s, cap 1800s). --type sets the recording kind (see record). --expected states what should have happened, shown to agents as the recording's Expected result (web, chrome-for-clipy and Linux screen sessions; for the others run clipy update afterwards). Web and chrome-for-clipy sessions attach browser evidence read from the browser itself (console output, uncaught errors, failed requests including GraphQL errors, WebSocket activity, environment) as the recording's browser diagnostics: --diagnostics errors (default) keeps warnings/errors and failures, all keeps every message and request, off keeps none; --network-detail also keeps request/response headers and text bodies (cookie and authorization headers never leave the machine; the server redacts the rest by field name and value pattern). With --source screen (mac-screen on macOS), --window records that window by itself (windows on top of it stay out only when --json reports windowCapture \"window\"; \"area\", from a Clipy Mac app older than bridge protocol v3 or on ffmpeg older than 5.1, records whatever is on top, and on Linux covered parts are black without a compositor) and --display records one display; on Linux --x-display :N picks the X display and --virtual-display records a private X display whose name is returned as xDisplay (session run exports it to the command as DISPLAY). --source chrome-extension records ONE TAB through the Clipy extension inside Chrome for Clipy (needs a one-time clipy chrome setup): no daemon, the extension records and uploads; start returns cdpHttpUrl and the recorded tab's url (opened in the background, never focused), --name titles the recording, the tab's sound is left out unless --tab-audio (detected speech would replace the marks as the transcript), mark/chapter (plain or --observed/--verdict, not --assert-*) are kept by the CLI and sent at stop as the transcript, stop waits for the upload and returns the link. --source chrome-for-clipy records ONE TAB (tab video + tab audio, no picker or gesture) inside the persistent Chrome for Clipy instance: the instance is started automatically (sign in once via clipy chrome start and the profile stays signed in), the recorded tab opens at --url, its CDP endpoint is always published as cdpUrl/cdpHttpUrl so drivers attach to the very browser being recorded, and stopping the session leaves Chrome for Clipy running; auth-capture flags and --user-data-dir are rejected for this source. --expose-cdp (web sessions) opens a CDP endpoint (cdpUrl/cdpHttpUrl in the state file + session start/status output) so your own tools can drive the page while it records; OFF by default (any local process could attach), and CLIPY_DISABLE_CDP=1 forces it off. `session run [start flags] -- <command…>` starts a session, runs the command with inherited stdio (env CLIPY_SESSION=1, plus CLIPY_CDP_URL when --expose-cdp, plus CLIPY_TARGET_ID/CLIPY_PAGE_WS_URL for the recorded tab with --source chrome-extension), then GUARANTEES cleanup: exit 0 uploads, any non-zero exit or signal discards (session abort) and propagates the child's code. It is the crash-safe wrapper, so a dead driver never records dead air. Accepts the same auth flags as record (--storage-state/--user-data-dir/--profile-directory/--cookie/--local-storage/--init-script; web only, rejected on --source mac-screen). `session run` exports CLIPY_SESSION_FILE to the child so mark/chapter resolve the session from any cwd. --json is supported on start/stop/status (start returns cdpUrl/cdpHttpUrl)", ["run", "--url", "--max", "--type", "--expected", "--source", "--window", "--display", "--x-display", "--virtual-display", "--tab-audio", "--expose-cdp", "--diagnostics", "--network-detail", "--storage-state", "--user-data-dir", "--profile-directory", "--cookie", "--local-storage", "--init-script", "--json"]),
       cmdDoc("mark", "clipy mark \"<text>\" [--observed \"<values>\" --verdict pass|fail] [--assert-selector <css> [--assert-text <substr>]] [--assert-url <glob>] [--fail-mode warn|abort] [--at <sec>|--ago <sec>] [--json]", "Drop a live-timestamped note into the active session. A mark carries at most ONE evidence provenance, and the two are labeled + tallied separately so they can never be pooled. DRIVER-ATTESTED (--observed '<values>' --verdict pass|fail, both required together): you drove the browser and report what YOU observed — renders '<text> [≈ ASSERT driver-attested; observed=<values>]' (pass) / '<text> [≈ FAILED driver-attested; observed=<values>]' (fail) — a HEDGE glyph, never ✓/✗, so a skim distinguishes provenance by shape alone and works in EVERY session type including --source mac-screen. Honesty rule: driver-attested means Clipy vouches the agent SAID it, not that Clipy verified it — put real observed values there. Combining --observed/--verdict with --assert-* is a usage error. CLIPY-VERIFIED assertion marks (Clipy-owned page only) make the note evidence Clipy itself checked: --assert-selector checks a CSS selector matches (its trimmed textContent is recorded as 'observed'); --assert-text requires that element's text to contain a substring (needs --assert-selector); --assert-url matches the page URL against a glob (** = any, * = any non-slash, no * = substring). The daemon evaluates against its live page and annotates the mark: pass ⇒ '<text> [assert ✓ verified-by-clipy; <observed>]', fail ⇒ '<text> [ASSERT ✗ verified-by-clipy; expected …; observed …]' — a false claim cannot read as fact. --fail-mode warn (default) records the ✗; --fail-mode abort DISCARDS the whole session on a failed assertion (no upload) and the CLI exits non-zero. If any assertion was attempted, a leading 0ms [verification] note is prepended, reporting the provenances as SEPARATE segments: '[verification] N clipy-verified: P passed, F failed, K unverified · M driver-attested: P passed, F failed' (a segment is omitted when empty; with only clipy-verified marks the legacy 'N assertion(s): …' rendering is byte-identical). --at <sec> stamps at an absolute recording time; --ago <sec> stamps N seconds before now (mutually exclusive). Assertions/backdating need a web session (rejected on --source mac-screen). Up to 200 marks per recording.", ["--observed", "--verdict", "--assert-selector", "--assert-text", "--assert-url", "--fail-mode", "--at", "--ago", "--json"]),
       cmdDoc("chapter", "clipy chapter \"<label>\" [--json]", "Mark a BEFORE/AFTER section boundary in the active recording (stored as '=== CHAPTER: <label> ==='). The PR-review shape: demo the base branch, run `clipy chapter \"AFTER — fix applied\"`, swap branches + restart the dev server, demo the fix — one video carrying both states. Works on web + --source mac-screen sessions.", ["--json"]),
       cmdDoc("doctor", "clipy doctor [--json]", "One-shot health check: API reachability (GET /api/health, with latency), API key + whoami round-trip, Mac agent bridge (exists/parses/pid/appVersion>=" + MIN_BRIDGE_APP_VERSION + "), Playwright resolvability (and the resolved path/node_modules dir), context/proof prerequisites (yt-dlp presence/path/version, ffmpeg + ffprobe presence/version, and whether that ffmpeg has libwebp), and install mode (npx/global/local) — each a pass/warn/fail with a fix hint; exits non-zero if any check fails. Read-only: it never installs anything, so a missing yt-dlp/ffmpeg reports WARN with the install command rather than silently downloading a binary. Run it first whenever an import, proof, or recording fails.", ["--json"]),
@@ -7744,6 +7872,15 @@ async function main(): Promise<void> {
       for: { type: "string" },
       timeout: { type: "string" },
       url: { type: "string" },
+      // recheck
+      out: { type: "string" },
+      plan: { type: "boolean", default: false },
+      "no-upload": { type: "boolean", default: false },
+      "settle-ms": { type: "string" },
+      "nav-timeout-ms": { type: "string" },
+      "max-steps": { type: "string" },
+      "fail-on-divergence": { type: "boolean", default: false },
+      "allow-destructive": { type: "boolean", default: false },
       name: { type: "string" },
       title: { type: "string" },
       description: { type: "string" },
@@ -7793,6 +7930,10 @@ async function main(): Promise<void> {
       yes: { type: "boolean", default: false },
       "allow-delete": { type: "boolean", default: false },
       "clear-description": { type: "boolean", default: false },
+      // What the recorder expected to happen (issue #741). Optional; shown to
+      // agents as "Expected result" in the recording's AREC.
+      expected: { type: "string" },
+      "clear-expected": { type: "boolean", default: false },
       access: { type: "string" },
       create: { type: "string" },
       untag: { type: "string", multiple: true },
@@ -7815,6 +7956,7 @@ async function main(): Promise<void> {
       help: { type: "boolean", short: "h", default: false },
     },
   });
+  const expectedResult = (values.expected as string | undefined)?.trim() || undefined;
 
   if (values.version) {
     process.stdout.write(`${VERSION}\n`);
@@ -8034,7 +8176,7 @@ async function main(): Promise<void> {
     }
     case "upload": {
       const file = rest[0] ?? (values.video as string | undefined);
-      if (!file) usageFail('usage: clipy upload <file.mp4|webm|mov> [--title "<t>"] [--type kind] [--access public|restricted|private] [--wait] [--json]', 2);
+      if (!file) usageFail('usage: clipy upload <file.mp4|webm|mov> [--title "<t>"] [--type kind] [--expected "<text>"] [--access public|restricted|private] [--wait] [--json]', 2);
       // Validated here, not by requireRecordingKind/parseNoteFlag, whose die()
       // would print prose and break the one-object --json contract.
       let uploadKind: string | undefined;
@@ -8053,6 +8195,7 @@ async function main(): Promise<void> {
         name: ((values.title as string | undefined) ?? (values.name as string | undefined))?.trim() || undefined,
         description: (values.description as string | undefined)?.trim() || undefined,
         recordingKind: uploadKind,
+        expectedResult,
         notes: uploadNotes.map(parseNoteFlag),
         accessMode: values.access as string | undefined,
         wait: Boolean(values.wait),
@@ -8061,11 +8204,13 @@ async function main(): Promise<void> {
       return;
     }
     case "update":
-      if (!rest[0]) usageFail('usage: clipy update <id|url> [--title "<title>"] [--description "<text>" | --clear-description]', 2);
+      if (!rest[0]) usageFail('usage: clipy update <id|url> [--title "<title>"] [--description "<text>" | --clear-description] [--expected "<text>" | --clear-expected]', 2);
       await cmdUpdate(libraryDeps(ctx, json), rest[0], {
         title: (values.title as string | undefined) ?? (values.name as string | undefined),
         description: values.description as string | undefined,
         clearDescription: Boolean(values["clear-description"]),
+        expected: values.expected as string | undefined,
+        clearExpected: Boolean(values["clear-expected"]),
       });
       return;
     case "share":
@@ -8152,6 +8297,22 @@ async function main(): Promise<void> {
         toMs: optMs(values["to-ms"], "--to-ms"),
         limit: optMs(values.limit, "--limit"),
         cursor: (values.cursor as string | undefined) || undefined,
+      });
+      return;
+    }
+    case "recheck": {
+      const numFlag = (v: unknown, fallback: number): number => (v === undefined ? fallback : Number(v));
+      await cmdRecheck(recheckDeps(ctx, json), rest[0], {
+        startUrl: (values.url as string | undefined)?.trim() || undefined,
+        outDir: (values.out as string | undefined)?.trim() || undefined,
+        planOnly: Boolean(values.plan),
+        upload: !values["no-upload"],
+        settleMs: numFlag(values["settle-ms"], 800),
+        navigationTimeoutMs: numFlag(values["nav-timeout-ms"], 5_000),
+        maxSteps: numFlag(values["max-steps"], RECHECK_MAX_STEPS),
+        failOnDivergence: Boolean(values["fail-on-divergence"]),
+        allowDestructive: Boolean(values["allow-destructive"]),
+        port: values.port === undefined ? undefined : Number(values.port),
       });
       return;
     }
@@ -8253,6 +8414,7 @@ async function main(): Promise<void> {
           undefined,
         description: (values.description as string | undefined)?.trim() || undefined,
         recordingKind: values.type ? requireRecordingKind(String(values.type)) : undefined,
+        expectedResult,
         notes: ((values.note as string[] | undefined) ?? []).map(parseNoteFlag),
         wait: Boolean(values.wait),
         json,
@@ -8288,6 +8450,7 @@ async function main(): Promise<void> {
             undefined,
           description: (values.description as string | undefined)?.trim() || undefined,
           recordingKind,
+          expectedResult,
           window: (values.window as string | undefined)?.trim() || undefined,
           display: (values.display as string | undefined)?.trim() || undefined,
           xDisplay: (values["x-display"] as string | undefined)?.trim() || undefined,
@@ -8330,6 +8493,7 @@ async function main(): Promise<void> {
               undefined,
             description: (values.description as string | undefined)?.trim() || undefined,
             recordingKind,
+            expectedResult,
             window: (values.window as string | undefined)?.trim() || undefined,
             display: (values.display as string | undefined)?.trim() || undefined,
             notes: noteFlags.map(parseNoteFlag),
@@ -8369,6 +8533,7 @@ async function main(): Promise<void> {
           undefined,
         description: (values.description as string | undefined)?.trim() || undefined,
         recordingKind,
+        expectedResult,
         notes: noteFlags.map(parseNoteFlag),
         viewports: values.viewports ? parseViewports(String(values.viewports)) : null,
         width: num(values.width, 1280),
@@ -8430,6 +8595,7 @@ async function main(): Promise<void> {
             undefined,
           description: (values.description as string | undefined)?.trim() || undefined,
           recordingKind: values.type ? requireRecordingKind(String(values.type)) : undefined,
+          expectedResult,
           maxSec: num(values.max, SESSION_DEFAULT_MAX_SEC),
           width: num(values.width, 1280),
           height: num(values.height, 720),

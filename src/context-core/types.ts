@@ -139,6 +139,12 @@ export interface ArecManifest {
   bundleVersion: 1;
   arecVersion: '1.3';
   title: string;
+  /**
+   * The source's own description (a YouTube video's description box), as the
+   * uploader wrote it. Untrusted text, normalized by normalizeSourceDescription.
+   * Absent when the source has none or the compiler predates the field.
+   */
+  description?: string;
   source: ContextSource;
   durationMs: number;
   language?: string;

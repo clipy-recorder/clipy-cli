@@ -10,12 +10,12 @@
  */
 export const CLIPY_SKILL_MD = `---
 name: clipy
-description: Read and create Clipy screen recordings, turn screenshots or tool-native video into proof, and turn any video into agent-readable context. Use when the user shares a clipy.online/video/<id> URL (watch, summarize, or act on a recording, bug report, or walkthrough), shares a YouTube URL, a Loom share link, or a local video file as context/reference for a task ("implement what this video shows", "give me the context of this video" — import it with clipy context import), OR asks you to verify your own work and share proof through Clipy.
+description: Read and create Clipy screen recordings, turn screenshots or tool-native video into proof, and turn any video into agent-readable context. Use when the user shares a clipy.online/video/<id> URL (watch, summarize, or act on a recording, bug report, or walkthrough), shares a YouTube URL, a Loom share link, or a local video file as context/reference for a task ("implement what this video shows", "give me the context of this video" — import it with clipy context import), OR asks you to verify your own work and share proof through Clipy, OR asks whether a recorded workflow still works on today's UI (re-check it with clipy recheck).
 ---
 
 # Clipy — recordings you can read AND make
 
-Written for @clipy/cli + @clipy/mcp 0.17.1 (the two versions move in lockstep). If
+Written for @clipy/cli + @clipy/mcp 0.18.0 (the two versions move in lockstep). If
 \`clipy --version\` reports older, upgrade first: \`npm i -g @clipy/cli@latest\`.
 
 Clipy (clipy.online) is the screen recorder built to be agent-readable. Every
@@ -27,7 +27,8 @@ WebM/MP4, capture a running web app headlessly, or capture the real Mac screen
 through the running Clipy app, then hand back a watchable link.
 
 Commands below use \`clipy\`. If it is not on PATH, prefix with \`npx @clipy/cli\`
-(identical). Exit codes: \`0\` ok · \`1\` error · \`2\` usage · \`3\` artifact not ready.
+(identical). Exit codes: \`0\` ok · \`1\` error · \`2\` usage · \`3\` artifact not ready ·
+\`4\` \`clipy recheck --fail-on-divergence\` did not match (diverged or incomplete).
 
 The canonical live operating contract is \`https://clipy.online/agents.md\`. Fetch
 it when network access is available. It explains which surface to choose, auth and
@@ -421,6 +422,51 @@ Capture only the relevant UI. Do not include secrets, private messages, customer
 data, or unrelated windows. After upload, read the returned result, then run
 \`clipy context <id>\` and confirm the narration matches the frames/video before
 sharing both URLs.
+
+## Re-check a recorded workflow against today's UI
+
+When the user asks "does this recorded flow still work?", "re-check this
+recording", or an agent is about to replay recorded steps, re-check it first.
+Recorded workflows fail silently when the app changes; this tells a broken flow
+from a redesign before anyone clicks the wrong control.
+
+    clipy recheck <id|url> --plan --json             # the steps, no browser
+    clipy recheck <id|url> --url <start-url> --json  # replay and report
+
+It reads the recording's interaction timeline (clicks with element labels,
+navigations, scrolls, typing), key moments and transcript, drives Chrome for
+Clipy (its own background window, signed in once with \`clipy chrome start\`)
+from \`--url\`, captures a frame per step and uploads them as a proof
+recording (\`--no-upload\` keeps it local). \`--url\` may be another host than
+the original (staging, localhost); recorded paths are then checked on that host, and nothing is clicked on any other host (a redirect back to production is a different screen).
+
+Each step comes back as one of:
+
+- \`matched\`: the page was on the recorded route and the labelled control was
+  found and clicked.
+- \`replayed\`: a scroll, replayed by direction (the distance is not recorded).
+- \`control_not_found\`: no visible control has the recorded label;
+  \`observed.nearbyControls\` names what is there now (often the rename).
+- \`different_screen\`: the page is on another route, or the control is covered
+  (a dialog, a banner). Nothing is clicked.
+- \`error\`: the step threw; the reason says what.
+- \`unmapped\` ("could not map step"): typing (values are never captured),
+  unlabelled or right clicks, drags, a label shared by several controls with
+  no position to choose, or a control that reads as irreversible (delete, pay,
+  send, submit and similar). Never report an unmapped step as passing.
+
+The replay clicks for real in a signed-in browser, so it never clicks an
+irreversible-looking control on its own. Pass \`--allow-destructive\` only when
+the user asked for those steps to be replayed and the site is one where that is
+safe (a test account, staging). Run \`--plan\` first to see which steps those are.
+
+Read \`summary.verdict\` (\`matches\` | \`diverged\` | \`incomplete\`) and
+\`summary.firstDivergence\`. When \`original.expectedResult\` is set, the user
+wrote down what should have happened: compare it with the last step's frame
+yourself, the re-check does not judge it. Return the re-check's \`shareUrl\`
+and \`contextUrl\`, the first diverging step, and its reason. Recordings with
+no click or navigation data (a plain web-recorder take) fail with
+\`no_interactions\`; there is nothing to replay.
 
 ## Making a recording — headless web app
 

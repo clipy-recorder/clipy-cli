@@ -300,6 +300,7 @@ async function compileYoutube(url: string, videoId: string, opts: ImportOptions)
     });
     return finish({
       title: opts.title ?? meta.title,
+      description: meta.description,
       source,
       durationMs: meta.durationMs,
       transcript,
@@ -359,6 +360,7 @@ async function compileYoutube(url: string, videoId: string, opts: ImportOptions)
 
   return finish({
     title: opts.title ?? meta.title,
+    description: meta.description,
     source,
     durationMs: meta.durationMs,
     transcript,
@@ -547,6 +549,7 @@ async function compileLocal(path: string, opts: ImportOptions): Promise<Compiled
 
 function finish(input: {
   title: string;
+  description?: string;
   source: ContextSource;
   durationMs: number;
   transcript: NormalizedTranscript;
@@ -557,6 +560,7 @@ function finish(input: {
   const sufficiency = classifyTranscript(input.transcript);
   const manifest = buildManifest({
     title: input.title,
+    ...(input.description ? { description: input.description } : {}),
     source: input.source,
     durationMs: input.durationMs,
     profile: "transcript",

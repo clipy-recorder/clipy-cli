@@ -137,6 +137,12 @@ try {
   let r = await run(["update", "rec-1", "--title", "Checkout bug", "--clear-description"]);
   assert.equal(r.code, 0, r.stderr);
   assert.deepEqual(last().body, { name: "Checkout bug", description: null });
+  r = await run(["update", "rec-1", "--expected", "Checkout completes and shows the receipt"]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(last().body, { expectedResult: "Checkout completes and shows the receipt" });
+  r = await run(["update", "rec-1", "--clear-expected"]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(last().body, { expectedResult: null });
   r = await run(["update", "rec-1"]);
   assert.equal(r.code, 2, "update with nothing to change is a usage error");
 

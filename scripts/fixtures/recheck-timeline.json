@@ -1,0 +1,26 @@
+{
+  "comment": "Interaction timeline of a recorded 'create a project, open its settings' workflow, in the /api/v1/recordings/{id}/interactions shape. Origin app.example.com; routes redacted the way the server stores them.",
+  "events": [
+    { "id": "e1", "kind": "navigation", "tMs": 0, "pageUrl": "https://app.example.com/projects", "provenance": "captured" },
+    { "id": "e2", "kind": "navigation", "tMs": 800, "pageUrl": "https://app.example.com/projects", "provenance": "captured" },
+    { "id": "e3", "kind": "pointer", "tMs": 1500, "position": { "x": 0.5, "y": 0.5 }, "provenance": "captured" },
+    { "id": "e4", "kind": "click", "tMs": 2000, "position": { "x": 0.9, "y": 0.1 }, "target": { "role": "button", "label": "New project" }, "pageUrl": "https://app.example.com/projects", "button": "primary", "evidence": { "tMs": 2100, "caption": "Clicks New project", "frameUrl": "https://cdn.example/frames/2100.jpg", "cropUrl": null }, "provenance": "captured" },
+    { "id": "e5", "kind": "navigation", "tMs": 4000, "pageUrl": "https://app.example.com/projects/new", "provenance": "captured" },
+    { "id": "e6", "kind": "typing", "tMs": 5000, "endMs": 5600, "pageUrl": "https://app.example.com/projects/new", "eventCount": 9, "provenance": "derived" },
+    { "id": "e7", "kind": "click", "tMs": 6000, "position": { "x": 0.5, "y": 0.8 }, "target": { "role": "AXButton", "label": "Create" }, "pageUrl": "https://app.example.com/projects/new", "button": "primary", "provenance": "captured" },
+    { "id": "e8", "kind": "navigation", "tMs": 7000, "pageUrl": "https://app.example.com/projects/:id", "provenance": "captured" },
+    { "id": "e9", "kind": "scroll", "tMs": 8000, "direction": "down", "pageUrl": "https://app.example.com/projects/:id", "provenance": "captured" },
+    { "id": "e10", "kind": "scroll", "tMs": 8500, "direction": "down", "pageUrl": "https://app.example.com/projects/:id", "provenance": "captured" },
+    { "id": "e11", "kind": "click", "tMs": 9000, "position": { "x": 0.2, "y": 0.2 }, "pageUrl": "https://app.example.com/projects/:id", "button": "primary", "provenance": "captured" },
+    { "id": "e12", "kind": "click", "tMs": 9500, "position": { "x": 0.3, "y": 0.3 }, "target": { "role": "button", "label": "Rename" }, "pageUrl": "https://app.example.com/projects/:id", "button": "secondary", "provenance": "captured" },
+    { "id": "e13", "kind": "click", "tMs": 10000, "position": { "x": 0.1, "y": 0.05 }, "target": { "role": "link", "label": "Settings" }, "pageUrl": "https://app.example.com/projects/:id", "button": "primary", "provenance": "captured" },
+    { "id": "e14", "kind": "navigation", "tMs": 11000, "pageUrl": "https://app.example.com/settings", "provenance": "captured" }
+  ],
+  "moments": [
+    { "tMs": 6100, "caption": "Creates the project", "frameUrl": "https://cdn.example/frames/6100.jpg", "cropUrl": null }
+  ],
+  "segments": [
+    { "start": 1.5, "end": 2.6, "text": "First I click new project." },
+    { "start": 9.8, "end": 10.6, "text": "Then settings." }
+  ]
+}
