@@ -1,7 +1,9 @@
 name: Publish
 
 # Publishes @clipy/cli to npm when a tag matching `v*` is pushed.
-# Inert until the NPM_TOKEN secret is set on this repository.
+# Publishes through npm trusted publishing (GitHub OIDC), so there is no npm
+# token to expire. The package lists this repo and publish.yml as its trusted
+# publisher on npmjs.com.
 
 on:
   push:
@@ -10,6 +12,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   publish:
@@ -22,11 +25,11 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm run build
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@11
       # Skips a version npm already has, so a re-run is harmless instead of
       # failing on npm's E403 for a re-publish.
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION="$(node -p "require('./package.json').version")"
           if npm view "@clipy/cli@${VERSION}" version >/dev/null 2>&1; then
