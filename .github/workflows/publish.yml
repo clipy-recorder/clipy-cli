@@ -22,7 +22,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          registry-url: https://registry.npmjs.org
+          # No registry-url: with one, setup-node sets a placeholder NODE_AUTH_TOKEN
+          # and npm sends that instead of using OIDC.
       - run: npm ci
       - run: npm run build
       # Trusted publishing needs npm 11.5.1 or later.
