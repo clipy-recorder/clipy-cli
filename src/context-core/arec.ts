@@ -19,11 +19,11 @@ import type {
 /** Roughly one transcript section per this many ms. */
 const SECTION_MS = 150_000;
 
-export const AREC_VERSION = '1.3' as const;
+export const AREC_VERSION = '1.4' as const;
 export const AREC_CANONICAL_FILENAME = 'recording.arec' as const;
 export const AREC_LEGACY_FILENAME = 'recording.md' as const;
 
-export type ArecDocumentProfile = 'clipy-recording' | 'imported-context';
+export type ArecDocumentProfile = 'recording' | 'imported-context';
 
 export interface ArecDocumentIdentity {
   readonly profile: ArecDocumentProfile;

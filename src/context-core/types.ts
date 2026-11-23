@@ -137,7 +137,7 @@ export interface ArecCompleteness {
 
 export interface ArecManifest {
   bundleVersion: 1;
-  arecVersion: '1.3';
+  arecVersion: '1.4';
   title: string;
   /**
    * The source's own description (a YouTube video's description box), as the

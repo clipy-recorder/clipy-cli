@@ -5,25 +5,79 @@
 [![node >= 18](https://img.shields.io/node/v/%40clipy%2Fcli)](https://www.npmjs.com/package/@clipy/cli)
 
 The [Clipy](https://clipy.online) command line. List, search, and read your screen
-recordings — transcripts, AI summaries, key moments — from the terminal, download the
+recordings (transcripts, AI summaries, key moments) from the terminal, download the
 MP4s, or export subtitles. No browser needed.
 
-[Clipy](https://clipy.online) is a free screen recorder ([Chrome extension and Mac app](https://clipy.online/download),
-plus a [web recorder](https://clipy.online/screen-recorder)) that gives every
-recording an instant share link, an AI transcript and summary, and
-[agent-readable context](https://clipy.online/for-agents) — so both humans and AI
-agents can act on what was recorded. This package is its terminal client.
+[Clipy](https://clipy.online) is the AI-native screen recorder, with apps for
+[Mac, Windows, Chrome, iPhone and Android](https://clipy.online/download) and a
+[web recorder](https://clipy.online/screen-recorder). Every recording gets an
+instant share link that plays with no signup, plus a transcript, summary and
+key moments that [AI agents can read](https://clipy.online/for-agents), so
+people and their AI tools can both act on what was recorded. This package is its terminal client.
 The canonical agent operating contract is
 [clipy.online/agents.md](https://clipy.online/agents.md).
 
 The read commands are **read-only** with any key. The write commands —
 [`proof`](#proof-from-any-agent-tool), [`record`](#record), the `session`/`mark`
 flow, and `transcript --replace` — create recordings or replace a transcript,
-and work only with an `ingest`-scoped key.
+and work only with an `ingest`-scoped key. With [`--local`](#local-mode-no-account-nothing-uploaded---local),
+`record`, `session`, `proof` and `context import` need no account at all: they
+build the recording on your machine and upload nothing.
 
 ```bash
 npx @clipy/cli setup claude   # login + skill + MCP server, in one
 ```
+
+What comes back from a headless recording ([`record`](#record)); the values here are illustrative:
+
+```console
+$ clipy record --url http://localhost:3000 --for 20 --json
+{
+  "id": "3kelcef8wo8h",
+  "shareUrl": "https://clipy.online/video/3kelcef8wo8h",
+  "contextUrl": "https://clipy.online/video/3kelcef8wo8h.arec",
+  "sizeBytes": 1482304
+}
+```
+
+`shareUrl` plays in any browser with no signup to watch; `contextUrl` is the same
+recording as text an AI agent reads. `clipy summary <id>` prints the TL;DR, key points
+and action items, and `clipy transcript <id>` prints one timestamped entry per line.
+
+## Let your agent watch any video (free)
+
+Clipy is a free tool to connect your AI agents and let them watch videos: a YouTube
+video, a Loom link or a video file on your machine. In Claude Code, install the
+`watch` plugin from the public [Clipy Local repo](https://github.com/clipy-recorder/clipy)
+(Apache-2.0):
+
+```text
+/plugin marketplace add clipy-recorder/clipy
+/plugin install watch@clipy
+/watch https://youtube.com/watch?v=…
+```
+
+For Codex, Cursor or any agent with a terminal, use the CLI. No account and no login:
+
+```bash
+npm i -g @clipy/cli
+clipy agents install codex                              # or: cursor · claude
+clipy context import https://youtube.com/watch?v=…     # captions fetched on your machine
+clipy context import https://www.loom.com/share/<id>   # the Loom transcript, fetched on your machine
+clipy models download english-fast && clipy speech install   # once, for local files
+clipy context import demo.mov --local                  # transcribed on your machine
+```
+
+Each import writes an agent-readable bundle: `recording.arec` (the same bytes as
+`recording.md`), `transcript.json` and `manifest.json`. AREC is the open format that
+makes a recording readable by AI agents: the transcript, the key moments with a frame
+of each, and timestamps, in plain Markdown ([arecformat.org](https://arecformat.org)).
+Add `--sync` (needs a Clipy account) and Clipy's server classifies the video and picks the
+moments worth a frame (extracted locally with `ffmpeg`). With `--sync`, the transcript, the
+AREC document and the selected frames, never the video itself, are saved to your private
+Clipy library, where agents search them through the MCP server. Details in
+[Import any video as context](#import-any-video-as-context) and at
+[clipy.online/ai-watch-videos](https://clipy.online/ai-watch-videos).
 
 ## Setup
 
@@ -192,7 +246,8 @@ Local files carry no captions, so they need `--transcript <.vtt|.srt|.json>`.
 With `--sync`, the server classifies the bundle: what kind of video it is and whether the
 words stand alone. Podcasts, interviews, and dictated content come back transcript-only; a
 screen walkthrough comes back with the timestamps worth a picture, and those frames are then
-extracted locally (needs `ffmpeg` — `brew install ffmpeg`). Without `--sync` the bundle stays
+extracted locally (needs `ffmpeg` — `brew install ffmpeg`) and uploaded as images to your
+private library; the video itself never is. Without `--sync` the bundle stays
 honestly transcript-only. `--no-frames` takes the verdict but never downloads media. Also:
 `--title`, `--tag` (repeatable), `--folder`, `--language`, `--output <dir>`.
 
@@ -746,6 +801,142 @@ or `--x-display`. On Windows there is no real-screen path for agents yet: use
 `--source chrome-for-clipy` for a browser tab, `--url` for a headless page, or
 `clipy proof` with your own tool's video or screenshots.
 
+## Local mode: no account, nothing uploaded (`--local`)
+
+Add `--local` to `record`, `session start`, `proof` or `context import` and Clipy
+builds the recording into an AREC folder on your own machine instead of uploading
+it. No Clipy account and no `clipy login`. Give the folder to your AI agent (Claude
+Code, Codex, Cursor or any other): it holds the video, a timestamped transcript,
+the moments that matter with a screenshot of each, and `recording.arec`, the
+document the agent reads.
+
+```bash
+clipy record --local --max 120                 # the screen, until Enter, Ctrl-C or 120 s
+clipy record --local --virtual-display --max 30  # Linux: a private Xvfb screen
+clipy record --local --url http://localhost:3000 --for 20 --note "8: clicked Save"
+clipy context import demo.mov --local          # a recording you already have
+clipy proof --frame before.png --frame after.png --caption "Before" --caption "After" --local
+```
+
+The last line printed is the absolute path of `recording.arec`; with `--json` you
+get one object: `{ok, local, arec, dir, video, durationMs, moments, frames, planner,
+transcript, warnings}`. The folder defaults to `~/clipy/recordings/<date-time>/`
+(readable by you only); pick one with `--out <dir>`. An `--out` folder that already
+holds files is refused, so a take never overwrites another; add `--force` to replace
+the take that is there.
+
+The config file, the model provider, ffmpeg and the output folder are checked
+before anything is recorded, so a missing key or a typo stops the command at once.
+If something fails after the capture, the video is kept and the command prints
+where (`The capture was kept at <path>`; `keptVideo` with `--json`).
+
+`record --local` without `--max` stops on Enter, Ctrl-C, SIGTERM or SIGHUP, and the
+take is still built. When stdin is not a terminal (an agent's shell, a pipe), it also
+stops when stdin closes, and it warns you: give agents `--max <sec>` so a take is
+always bounded.
+
+```text
+recording.mp4          the video
+recording.cursor.json  pointer and click sidecar, when the capture has one
+transcript.json        timestamped segments (speech, plus your notes and marks)
+moments.json           the moments picked
+frames/<ms>.jpg        one screenshot per moment
+recording.arec         AREC 1.4, every reference relative to the folder
+```
+
+What each command records with `--local` is what it records without it:
+
+| Command | Capture |
+|---|---|
+| `record --local` (no `--url`, no `--source`) | The CLI's own screen recorder (ffmpeg) on macOS, Windows and Linux, until Enter, Ctrl-C or `--max`. `--mic` adds the microphone; `--display`/`--window` take an id from `clipy sources --local`; `--virtual-display` records a private Xvfb display on Linux. |
+| `record --local --url <u>` | The headless browser capture (silent). Notes become narration. |
+| `record --local --source screen` on Linux | The X11 recorder, timed by `--for`. |
+| `session start ... --local` | Headless web, `--source screen` on Linux, or `--source chrome-for-clipy`. Marks and chapters work as usual; `session stop` builds the AREC. Not available for `mac-screen` or `chrome-extension` yet, because the Mac app and the extension upload their own recordings. |
+| `proof ... --local` | Frames or `--video`, as usual. Each frame and caption becomes a key moment. |
+| `context import <file> --local` | Transcribes the file (unless `--transcript` is given), picks moments, extracts frames. `--language`, `--tag`, `--folder` and `--no-frames` do not apply to a file and are refused. YouTube and Loom URLs keep their usual transcript-only bundle, written to `--out`, which never calls Clipy; `--sync` is refused with `--local`. |
+
+Notes, marks and captions are added to the transcript as narration, and each one
+also gets a key moment and a screenshot, so the agent sees what you pointed out.
+
+### Transcription and moments
+
+Moments always come from rules on your machine: highlights, pen drawings, clicks
+and pointer rests. Add a model provider and it also reads the transcript for
+spoken references ("this button", "it breaks here"). Transcription defaults to an
+on-device model.
+
+```bash
+clipy models download english-fast       # Parakeet TDT-CTC 110M, about 104 MB, English
+clipy models download multilingual       # Whisper base, about 161 MB, about 99 languages
+clipy speech install                     # the engine that runs them, about 35 MB
+export CLIPY_MODEL_API_KEY=...           # set the key in your environment, not on the command line
+clipy local setup --model-provider openrouter
+clipy local setup --model-provider ollama --model llama3.2
+clipy local setup --transcribe groq --transcribe-key -   # reads the key from stdin
+clipy local status                       # config file, provider, transcription, models, capture
+```
+
+Providers: `openrouter`, `openai`, `gemini`, `groq`, `ollama`, `lmstudio`, `custom`
+(`--base-url`), `none`. Transcription: `local-english`, `local-multilingual`,
+`openai`, `groq`, `deepgram`, `assemblyai`, `elevenlabs`, `gemini`, `none`. Settings
+live in their own file (`clipy local status` prints the path, mode 0600), and env
+vars override it: `CLIPY_MODEL_PROVIDER`, `CLIPY_MODEL_BASE_URL`,
+`CLIPY_MODEL_API_KEY`, `CLIPY_MODEL`, `CLIPY_TRANSCRIBE`, `CLIPY_TRANSCRIBE_API_KEY`,
+`CLIPY_TRANSCRIBE_MODEL`, `CLIPY_TRANSCRIBE_BASE_URL`, `CLIPY_LOCAL_CONFIG`.
+
+Keys: the env vars `CLIPY_MODEL_API_KEY` and `CLIPY_TRANSCRIBE_API_KEY` are the
+preferred way, because a key typed as a command-line argument can stay in your
+shell history, show up in the process list and land in an agent's command log.
+To save a key in the settings file instead, pass `-` (`--model-key -`,
+`--transcribe-key -`) and the key is read from stdin, one line. A key given
+literally still works, with a note about where it may have been kept.
+
+On-device transcription runs on a speech engine, `sherpa-onnx-node` (about 35 MB),
+which is not installed with the CLI. The first take that needs it asks before
+downloading it with npm into a Clipy folder next to the speech models; answer no
+and the take stops before recording anything. Without a terminal to ask in (an
+agent, CI, `--json`), the take stops with `speech_engine_required` instead, so
+accept up front:
+
+```bash
+clipy speech install                     # download it now; clipy speech status shows where it is
+clipy record --local --mic --max 60 --yes   # or let this take download it without asking
+export CLIPY_INSTALL_SPEECH_ENGINE=1     # or accept it for every take
+```
+
+`CLIPY_SPEECH_ENGINE_DIR` moves the folder. A copy installed next to a global npm
+install of the CLI (`npm i -g sherpa-onnx-node@2.0.1`) is used too.
+
+Speech models (downloaded only when you ask, checksum-verified; `clipy models list`
+shows each one's licence):
+
+| Model | What it is | Licence |
+|---|---|---|
+| `english-fast` | NVIDIA Parakeet TDT-CTC 110M | CC-BY-4.0 |
+| `multilingual` | OpenAI Whisper base | MIT |
+
+Both run with [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) (Apache-2.0).
+
+### Where your data goes
+
+| Choice | What leaves your machine |
+|---|---|
+| No provider (rules only, on-device transcription) | Nothing. |
+| Ollama or LM Studio | Nothing: the model runs on your machine. |
+| OpenRouter, OpenAI, Gemini, Groq or a custom URL | The transcript text, click labels and a bounded sample of pointer and key events (with the capture area) go to that provider to pick spoken moments. |
+| On-device transcription | Nothing: the audio stays on your machine. |
+| A transcription key | The audio goes to that provider. |
+
+The video and screenshots never leave your machine, and nothing is ever sent to
+Clipy. Each `recording.arec` states what was sent where.
+
+Want a share link anyone can watch, with no signup to watch? Run
+`clipy upload <dir>/recording.mp4` (that one needs a Clipy account).
+
+`clipy doctor` reports local mode in its own section; it is never a failure, so an
+install that only uses the hosted product stays healthy. `clipy doctor --local`
+checks only local mode and makes no request to Clipy.
+
 ## Scripting
 
 Every command has machine-readable output. `--json` is supported on **`list`, `memory search`, `search`,
@@ -807,4 +998,14 @@ Markdown. The legacy `.md` URL remains byte-identical. Details at
 
 ## License
 
-MIT © Clipy
+MIT © Clipy, except the files under `src/local/vendor/` (compiled into
+`dist/local/vendor/`), which come from Clipy's local edition packages and are
+licensed under the Apache License 2.0: see [LICENSE-APACHE](LICENSE-APACHE). Each of
+those files carries an `SPDX-License-Identifier: Apache-2.0` header. The package's
+licence expression is therefore `MIT AND Apache-2.0`.
+
+The on-device speech models are not part of the package; `clipy models download`
+fetches them from their publishers. `english-fast` is NVIDIA's Parakeet TDT-CTC 110M,
+licensed CC-BY-4.0; `multilingual` is OpenAI Whisper base, licensed MIT. Both run
+with sherpa-onnx, licensed Apache-2.0, which is not part of the package either:
+`clipy speech install` (or the first take that needs it) downloads it from npm.

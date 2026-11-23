@@ -440,7 +440,7 @@ export function describeCaptions(c: CaptionProvenance): string {
       : `${c.language}, auto-translated`;
   }
   if (c.originalUnknown) return `${c.language}, auto-generated; the video's original language is unknown`;
-  return `${c.language}, auto-generated — video's original language`;
+  return `${c.language}, auto-generated, in the video's original language`;
 }
 
 function provenanceOf({ track: _track, flag: _flag, ...provenance }: CaptionAttempt): CaptionProvenance {

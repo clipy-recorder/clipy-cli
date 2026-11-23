@@ -128,7 +128,7 @@ const dubbed = planCaptionAttempts(dubbedMeta());
 assert.deepEqual(dubbed.map((a) => a.track), ["en-orig"],
   "the English speech, and no other dub or translation once the original is known");
 assert.equal(dubbed[0].source, "auto_captions");
-assert.equal(describeCaptions(dubbed[0]), "en, auto-generated — video's original language");
+assert.equal(describeCaptions(dubbed[0]), "en, auto-generated, in the video's original language");
 
 const dubbedExplicit = planCaptionAttempts(dubbedMeta(), "en");
 assert.equal(dubbedExplicit.length, 1);

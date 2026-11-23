@@ -15,7 +15,7 @@ description: Read and create Clipy screen recordings, turn screenshots or tool-n
 
 # Clipy — recordings you can read AND make
 
-Written for @clipy/cli + @clipy/mcp 0.18.0 (the two versions move in lockstep). If
+Written for @clipy/cli + @clipy/mcp 0.19.0 (the two versions move in lockstep). If
 \`clipy --version\` reports older, upgrade first: \`npm i -g @clipy/cli@latest\`.
 
 Clipy (clipy.online) is the screen recorder built to be agent-readable. Every
@@ -864,6 +864,51 @@ sibling \`audio\` object in \`--json\`. Read it rather than assuming your flags 
 Either way the warning means the same thing: WE DO NOT KNOW that the mic is off.
 Believe it, tell the user, and update the app — do not report a recording as
 mic-free on the strength of the flag you passed.
+
+## Local mode: keep the recording on this machine (--local)
+
+When the user wants recordings kept on their machine, or has no Clipy account,
+add \`--local\`. Nothing is uploaded and no login is needed; the CLI builds an AREC
+folder (video, transcript, key moments with a screenshot each, recording.arec).
+
+\`\`\`bash
+clipy record --local --max 60 --json                 # the screen; always pass --max
+clipy record --local --url http://localhost:3000 --for 20 --note "8: clicked Save"
+clipy session start --url http://localhost:3000 --local   # then mark, then: clipy session stop
+clipy proof --frame before.png --frame after.png --caption "Before: ..." --caption "After: ..." --local
+\`\`\`
+
+On macOS, \`--source screen\` (or \`mac-screen\`) with \`--local\` records through
+Clipy Local, the open-source local edition of the Mac app, never the official
+Clipy app. Clipy Local must be running; if it is not, the error says so, and
+\`clipy record --local --max 60\` (the CLI's own recorder) still works. Marks and
+chapters become narration in its AREC.
+
+\`\`\`bash
+clipy session start --local --source screen --window "Chrome" --max 300
+clipy mark "Clicked Save; the toast says Saved"
+clipy session stop      # waits for Clipy Local to process the take; prints the recording.arec path
+\`\`\`
+
+- The last stdout line is the absolute path of \`recording.arec\` (\`arec\` in the
+  \`--json\` object). Give the user that path and read it yourself; frames and the
+  video sit next to it.
+- Never upload a local take unless the user asks. Do not run \`clipy upload\` on
+  it or start the session without \`--local\`. \`session stop --local\` refuses a
+  session that would upload.
+- Pass \`--max\` (or \`--for\`) when you record: without it the take only stops on
+  Enter, a signal, or when stdin closes.
+- On-device transcription needs a speech engine (about 35 MB from npm) that is
+  not installed with the CLI. A take that needs it and finds it missing stops
+  before recording with code \`speech_engine_required\`. Ask the user, then run
+  \`clipy speech install\` (or add \`--yes\` to the take) and re-run.
+- \`--out <dir>\` must be new or empty (\`--force\` replaces an earlier take). If
+  processing fails, the error says where the capture was kept; nothing is lost.
+- With no provider configured, nothing leaves the machine. If the user set a model
+  provider or a transcription key (\`clipy local status\` shows which), the
+  transcript and sampled interactions or the audio go to that provider, never to
+  Clipy. Never put a key on the command line yourself: ask the user to set
+  \`CLIPY_MODEL_API_KEY\` or \`CLIPY_TRANSCRIBE_API_KEY\`.
 
 ## Rules for recording (follow strictly)
 
