@@ -15,7 +15,7 @@ description: Read and create Clipy screen recordings, turn screenshots or tool-n
 
 # Clipy — recordings you can read AND make
 
-Written for @clipy/cli + @clipy/mcp 0.19.0 (the two versions move in lockstep). If
+Written for @clipy/cli + @clipy/mcp 0.20.0 (the two versions move in lockstep). If
 \`clipy --version\` reports older, upgrade first: \`npm i -g @clipy/cli@latest\`.
 
 Clipy (clipy.online) is the screen recorder built to be agent-readable. Every
@@ -879,15 +879,16 @@ clipy proof --frame before.png --frame after.png --caption "Before: ..." --capti
 \`\`\`
 
 On macOS, \`--source screen\` (or \`mac-screen\`) with \`--local\` records through
-Clipy Local, the open-source local edition of the Mac app, never the official
-Clipy app. Clipy Local must be running; if it is not, the error says so, and
+the Mac app and keeps the take on this computer: Clipy Local, the open-source
+local edition, when it is running, otherwise the official Clipy app (signed in,
+recent enough to keep a take local). If neither can, the error says so, and
 \`clipy record --local --max 60\` (the CLI's own recorder) still works. Marks and
 chapters become narration in its AREC.
 
 \`\`\`bash
 clipy session start --local --source screen --window "Chrome" --max 300
 clipy mark "Clicked Save; the toast says Saved"
-clipy session stop      # waits for Clipy Local to process the take; prints the recording.arec path
+clipy session stop      # waits for the app to process the take; prints the recording.arec path
 \`\`\`
 
 - The last stdout line is the absolute path of \`recording.arec\` (\`arec\` in the
@@ -907,7 +908,9 @@ clipy session stop      # waits for Clipy Local to process the take; prints the 
 - With no provider configured, nothing leaves the machine. If the user set a model
   provider or a transcription key (\`clipy local status\` shows which), the
   transcript and sampled interactions or the audio go to that provider, never to
-  Clipy. Never put a key on the command line yourself: ask the user to set
+  Clipy. A Mac take through the official Clipy app is the exception: it sends the
+  transcript, click labels, sampled interactions and the capture size to Clipy to
+  pick the key moments (the video, audio and screenshots stay on the Mac). Never put a key on the command line yourself: ask the user to set
   \`CLIPY_MODEL_API_KEY\` or \`CLIPY_TRANSCRIBE_API_KEY\`.
 
 ## Rules for recording (follow strictly)

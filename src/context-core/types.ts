@@ -25,6 +25,9 @@ export type TranscriptSource =
   | 'auto_captions_translated'
   | 'user_file'
   | 'local_stt'
+  /** Transcribed by Clipy's server-side speech recognition from an uploaded
+   *  file (the /tools/video-to-ai converter). */
+  | 'server_stt'
   /** The source published none. The bundle is metadata-only: still worth
    *  storing (it says which video, how long, and where it lives), but an agent
    *  must not read the absence of speech as an absence of content. */

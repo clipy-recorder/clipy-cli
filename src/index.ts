@@ -114,6 +114,8 @@ import {
   type BridgeDiagnostics,
   type BridgeEdition,
   bridgeAppName,
+  isLocalTake,
+  localTakeAppName,
   bridgeApplicable,
   resolveFromSources,
 } from "./macBridge.js";
@@ -265,9 +267,9 @@ function localNarration(notes: readonly NarrationNote[]): Array<{ startMs: numbe
   return notes.map((n) => ({ startMs: n.startMs, ...(n.endMs !== undefined ? { endMs: n.endMs } : {}), text: n.text }));
 }
 
-/** --local real-screen takes on macOS go through Clipy Local, the local edition of the Mac app. */
+/** --local real-screen takes through the desktop app (Clipy Local, or the official app on request). */
 const LOCAL_MAC_PLATFORM =
-  "--source mac-screen with --local records through Clipy Local, which runs on macOS. " +
+  "--source mac-screen with --local records through the Clipy desktop app, which runs on macOS and Windows. " +
   "Use clipy record --local (the CLI's own screen recorder), a web page with --url, or clipy proof --local.";
 const LOCAL_MAC_OUT =
   "--out and --force do not apply to --source mac-screen with --local: Clipy Local keeps each take in its own folder, reported as out";
@@ -4074,8 +4076,9 @@ interface SessionState {
   extensionRecordingId?: string;
   /** chrome-extension: what the extension build supports ("name", "narration"). */
   extensionFeatures?: string[];
-  /** edition "local": Clipy Local owns the take; stop returns its AREC path. */
-  bridge?: { socketPath: string; token: string; pid: number; edition?: BridgeEdition };
+  /** edition "local" (Clipy Local) or localTake (the official app on request):
+   *  the take stays on this computer and stop returns its AREC path. */
+  bridge?: { socketPath: string; token: string; pid: number; edition?: BridgeEdition; localTake?: boolean };
   pid: number;
   cwd: string;
   url: string;
@@ -4540,21 +4543,15 @@ async function evaluateAssertion(page: PwPage, assert: MarkAssert): Promise<Asse
 // --- Real-screen source naming ----------------------------------------------
 
 /**
- * `--source screen` is the real screen on every OS: the Clipy Mac app on
- * macOS and the CLI's own X11 recorder on Linux. `mac-screen` stays the
- * explicit Mac spelling. Windows has no screen path for agents yet, so it is
- * refused with the paths that do work there, never silently downgraded.
+ * `--source screen` is the real screen on every OS: the Clipy desktop app on
+ * macOS and Windows (through its agent bridge) and the CLI's own X11 recorder
+ * on Linux. `mac-screen` stays the explicit spelling of the desktop app's
+ * bridge; the name predates the Windows app.
  */
-const WINDOWS_SCREEN_REFUSAL =
-  "--source screen isn't available on Windows yet: the Clipy Windows app has no agent bridge. " +
-  "Record a browser tab with --source chrome-for-clipy, a web page headlessly with --url, " +
-  "or hand your own tool's screenshots or video to `clipy proof`.";
-
 function normalizeScreenSource(raw: string, platform: NodeJS.Platform = process.platform): string {
   if (raw === "screen") {
-    if (platform === "darwin") return "mac-screen";
     if (platform === "linux") return "linux-screen";
-    die(WINDOWS_SCREEN_REFUSAL, 2);
+    return "mac-screen";
   }
   if (raw === "linux-screen" && platform !== "linux") die("--source linux-screen records an X11 display and only runs on Linux", 2);
   // CLIPY_BRIDGE_FILE points the bridge client at an explicit app (tests and
@@ -5528,7 +5525,8 @@ function appGoneMessage(state: SessionState): string {
     : "the Clipy app is no longer running — session cleared. Start a new one.";
 }
 
-/** Clipy Local through its bridge; a missing or wrong app is a clear error, never the official app. */
+/** The app for a --local take: Clipy Local, or the official app when it can
+ *  keep the take on this computer. Never an app that would upload. */
 function readLocalBridgeOrDie(): BridgeInfo {
   try {
     return readBridgeInfo("local");
@@ -5553,15 +5551,15 @@ function waitOrStopSignal(seconds: number): Promise<void> {
   });
 }
 
-/** Clipy Local's `stop` payload in the shape of the other --local results. */
-function localBridgeResultJson(result: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+/** A local take's `stop` payload in the shape of the other --local results. */
+function localBridgeResultJson(result: Record<string, unknown>, app: string, extra: Record<string, unknown> = {}) {
   const arec = String(result.arecPath ?? "");
   const dir = typeof result.directory === "string" && result.directory ? result.directory : dirname(arec);
   const status = typeof result.status === "string" ? result.status : "processing";
   return {
     ok: status !== "failed",
     local: true,
-    app: "Clipy Local",
+    app,
     arec,
     arecPath: arec,
     dir,
@@ -5577,25 +5575,46 @@ function localBridgeResultJson(result: Record<string, unknown>, extra: Record<st
   };
 }
 
-/** The end of a Clipy Local take: the AREC path last on stdout, or one JSON object. */
-function reportLocalBridgeResult(result: Record<string, unknown>, json: boolean, extra: Record<string, unknown> = {}): void {
-  const out = localBridgeResultJson(result, extra);
+/** The end of a local take: the AREC path last on stdout, or one JSON object. */
+function reportLocalBridgeResult(result: Record<string, unknown>, json: boolean, app: string, extra: Record<string, unknown> = {}): void {
+  const out = localBridgeResultJson(result, app, extra);
   if (out.status === "failed") process.exitCode = 1;
   if (out.status !== "ready") {
-    process.stderr.write(`Warning: Clipy Local reports ${out.status}${out.message ? `: ${out.message}` : ""}\n`);
+    process.stderr.write(`Warning: ${app} reports ${out.status}${out.message ? `: ${out.message}` : ""}\n`);
   }
   if (json) {
     printJson(out);
     return;
   }
   process.stderr.write(
-    `Done in Clipy Local (${out.status}). Nothing was uploaded. Give your AI agent the path below.\n` +
+    `Done in ${app} (${out.status}). Nothing was uploaded. Give your AI agent the path below.\n` +
       `Want a share link anyone can watch, with no signup to watch? Run: clipy upload ${JSON.stringify(out.video)}\n`,
   );
   process.stdout.write(`${out.arec}\n`);
 }
 
-/** `clipy record --local --source mac-screen`: one take through Clipy Local, kept on this computer. */
+/**
+ * Start a local take. The official app keeps a take on this computer only
+ * when it says so: a start that does not echo `local: true` is aborted at
+ * once rather than left to upload.
+ */
+async function startLocalTake(info: BridgeInfo, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const started = await bridgeRequest(info, "start", args).catch((e: Error) => die(e.message));
+  if (started.local !== true) {
+    const aborted = await bridgeRequest(info, "abort").then(
+      () => true,
+      () => false,
+    );
+    die(
+      aborted
+        ? "the Clipy app started an uploading recording instead of a local take, so it was discarded. Update Clipy from https://clipy.online/download and try again"
+        : "the Clipy app started an uploading recording instead of a local take, and it could not be stopped from here: it may still be recording and uploading. Cancel it in the Clipy app now, then update Clipy from https://clipy.online/download",
+    );
+  }
+  return started;
+}
+
+/** `clipy record --local --source mac-screen`: one take kept on this computer, through Clipy Local or the official app. */
 async function cmdRecordMacLocal(opts: {
   audio: AudioChoice;
   forSec: number;
@@ -5612,11 +5631,12 @@ async function cmdRecordMacLocal(opts: {
     die('pass-scoped --note values need --viewports; a screen recording is one take, so use "12: text"', 2);
   }
   const info = readLocalBridgeOrDie();
+  const app = localTakeAppName(info);
   const log = (m: string) => {
     if (!opts.json) process.stderr.write(`${m}\n`);
   };
   const target = await resolveBridgeTarget(info, opts);
-  log(c.dim(`asking Clipy Local (v${info.appVersion || "?"}) to record ${target?.label ?? "the screen"}…`));
+  log(c.dim(`asking ${app} (v${info.appVersion || "?"}) to record ${target?.label ?? "the screen"} on this computer…`));
   if (target) {
     log(
       `${c.bold(`recording ${target.resolved.kind}:`)} "${target.resolved.title}" (id ${target.resolved.id})\n` +
@@ -5624,25 +5644,25 @@ async function cmdRecordMacLocal(opts: {
     );
   }
   if (opts.recordingKind || opts.expectedResult) {
-    log(c.yellow("note: --type and --expected are not applied to Clipy Local takes"));
+    log(c.yellow("note: --type and --expected are not applied to local takes"));
   }
   const audioUncontrollable = warnAudioUncontrollable(info.protocolVersion, opts.audio, (m) => process.stderr.write(`${m}\n`));
   const windowWarned = warnWindowCaptureUnknown(info.protocolVersion, target, (m) => process.stderr.write(`${m}\n`));
-  const startResult = await bridgeRequest(info, "start", {
+  const startResult = await startLocalTake(info, {
     audio: { includeSystemAudio: opts.audio.includeSystemAudio, includeMic: opts.audio.includeMic },
     maxSec: Math.min(opts.forSec + 60, 1800),
     title: opts.name,
     description: opts.description,
     notes: resolveNarrationNotes(opts.notes, [0]).map((n) => ({ startMs: n.startMs, text: n.text })),
     ...(target ? { source: target.source } : {}),
-  }).catch((e: Error) => die(e.message));
+  });
   const appliedAudio = reportAudio(opts.audio, echoedAudio(startResult), log, audioUncontrollable);
   const windowCapture = appliedWindowCapture(target, startResult, (m) => process.stderr.write(`${m}\n`), windowWarned);
   log(c.dim(`recording for ${opts.forSec}s (Ctrl-C stops early and keeps the take)…`));
   await waitOrStopSignal(opts.forSec);
-  log(c.dim("stopping; Clipy Local is building the AREC on this computer…"));
+  log(c.dim(`stopping; ${app} is building the AREC on this computer…`));
   const result = await bridgeRequest(info, "stop").catch((e: Error) => die(e.message));
-  reportLocalBridgeResult(result, opts.json, {
+  reportLocalBridgeResult(result, opts.json, app, {
     captureMode: "mac-screen",
     source: captureSourceResult(target?.resolved),
     audio: appliedAudio,
@@ -5650,7 +5670,7 @@ async function cmdRecordMacLocal(opts: {
   });
 }
 
-/** `clipy session start --local --source mac-screen`: Clipy Local owns the take; stop returns its AREC. */
+/** `clipy session start --local --source mac-screen`: Clipy Local or the official app keeps the take on this computer; stop returns its AREC. */
 async function cmdSessionStartMacLocal(opts: Parameters<typeof cmdSessionStart>[1]): Promise<void> {
   const file = sessionFilePath(process.cwd());
   const existing = readSessionState(file);
@@ -5658,20 +5678,21 @@ async function cmdSessionStartMacLocal(opts: Parameters<typeof cmdSessionStart>[
     die("a recording session is already active here: finish it with `clipy session stop` or discard it with `clipy session abort`");
   }
   const info = readLocalBridgeOrDie();
+  const app = localTakeAppName(info);
   const maxSec = Math.min(Math.max(1, opts.maxSec), SESSION_HARD_CAP_SEC);
   const target = await resolveBridgeTarget(info, opts);
   if ((opts.recordingKind || opts.expectedResult) && !opts.json) {
-    process.stderr.write(`${c.yellow("note: --type and --expected are not applied to Clipy Local takes")}\n`);
+    process.stderr.write(`${c.yellow("note: --type and --expected are not applied to local takes")}\n`);
   }
   const audioUncontrollable = warnAudioUncontrollable(info.protocolVersion, opts.audio, (m) => process.stderr.write(`${m}\n`));
   const windowWarned = warnWindowCaptureUnknown(info.protocolVersion, target, (m) => process.stderr.write(`${m}\n`));
-  const startResult = await bridgeRequest(info, "start", {
+  const startResult = await startLocalTake(info, {
     audio: { includeSystemAudio: opts.audio.includeSystemAudio, includeMic: opts.audio.includeMic },
     maxSec,
     title: opts.name,
     description: opts.description,
     ...(target ? { source: target.source } : {}),
-  }).catch((e: Error) => die(e.message));
+  });
   writeSessionState(file, macSessionState(info, maxSec));
   const appliedAudio = reportAudio(opts.audio, echoedAudio(startResult), (m) => process.stderr.write(`${m}\n`), audioUncontrollable);
   const windowCapture = appliedWindowCapture(target, startResult, (m) => process.stderr.write(`${m}\n`), windowWarned);
@@ -5679,7 +5700,7 @@ async function cmdSessionStartMacLocal(opts: Parameters<typeof cmdSessionStart>[
     printJson({
       state: "recording",
       local: true,
-      app: "Clipy Local",
+      app,
       captureMode: "mac-screen",
       maxSec,
       recordingId: typeof startResult.recordingId === "string" ? startResult.recordingId : null,
@@ -5692,7 +5713,7 @@ async function cmdSessionStartMacLocal(opts: Parameters<typeof cmdSessionStart>[
     });
     return;
   }
-  process.stdout.write(`${c.green("✓")} Clipy Local is recording ${target ? target.label : "your screen"} (max ${maxSec}s); nothing is uploaded\n`);
+  process.stdout.write(`${c.green("✓")} ${app} is recording ${target ? target.label : "your screen"} (max ${maxSec}s); it stays on this computer, nothing is uploaded\n`);
   if (target) {
     process.stdout.write(
       `${c.bold(`recording ${target.resolved.kind}:`)} "${target.resolved.title}" (id ${target.resolved.id})\n` +
@@ -5715,6 +5736,7 @@ function macSessionState(info: BridgeInfo, maxSec: number): SessionState {
       token: info.token,
       pid: info.pid,
       ...(info.edition === "local" ? { edition: "local" as const } : {}),
+      ...(info.localTake ? { localTake: true } : {}),
     },
     pid: info.pid,
     cwd: process.cwd(),
@@ -5742,6 +5764,7 @@ function bridgeInfoFromSession(state: SessionState): BridgeInfo {
     appVersion: "",
     protocolVersion: 1,
     edition: state.bridge.edition ?? "cloud",
+    localTake: state.bridge.localTake === true,
   };
 }
 
@@ -6650,10 +6673,11 @@ async function cmdSessionStop(json: boolean, local = false): Promise<void> {
     return;
   }
   if (state.kind === "mac") {
-    const localApp = state.bridge?.edition === "local";
+    const localApp = isLocalTake(bridgeInfoFromSession(state));
+    const app = localTakeAppName(bridgeInfoFromSession(state));
     if (!json) {
       process.stderr.write(
-        `${c.dim(localApp ? "stopping; Clipy Local is building the AREC on this computer…" : "stopping + uploading…")}\n`,
+        `${c.dim(localApp ? `stopping; ${app} is building the AREC on this computer…` : "stopping + uploading…")}\n`,
       );
     }
     // No daemon on the mac path to merge a tally, so emit the [verification]
@@ -6678,7 +6702,7 @@ async function cmdSessionStop(json: boolean, local = false): Promise<void> {
     });
     cleanupSessionFiles(state, file);
     if (localApp) {
-      reportLocalBridgeResult(result, json);
+      reportLocalBridgeResult(result, json, app);
       return;
     }
     const publicId = String(result.publicId ?? "");
@@ -6747,7 +6771,7 @@ async function cmdSessionStop(json: boolean, local = false): Promise<void> {
  * so refuse instead of quietly uploading.
  */
 function refuseLocalFlagOnUploadSession(state: SessionState): void {
-  if (state.local || state.bridge?.edition === "local") return;
+  if (state.local || state.bridge?.edition === "local" || state.bridge?.localTake) return;
   die("this session was started without --local and uploads on stop; use clipy session abort to discard it", 2);
 }
 
@@ -8667,13 +8691,13 @@ function cmdGuide(json: boolean): void {
       cmdDoc(
         "record --local",
         "clipy record --local [--max sec] [--mic] [--virtual-display] [--display <id>|--window <id>] [--url <u>] [--source screen] [--note '12: text']… [--title t] [--out dir] [--json]",
-        "Local mode: no Clipy account and nothing uploaded. The capture is the same as without --local (with --url the headless browser capture, silent; with --source screen on Linux the X11 recorder, timed by --for or --max; with --source screen or mac-screen on macOS, Clipy Local, the open-source local edition of the Mac app, records through its agent bridge for --for or --max seconds (default 15, cap 1740; Ctrl-C stops early and keeps the take), never the official Clipy app, and fails with a clear message when Clipy Local is not running; --window and --display name a window or display Clipy Local can see; --out and --force do not apply because Clipy Local keeps each take in its own folder); with no --url and no --source, or --source screen on Windows, the CLI's local screen recorder (ffmpeg) runs until Enter, Ctrl-C, SIGTERM, SIGHUP or --max (with no --max and stdin not a terminal, also until stdin closes, with a warning), with the microphone only on --mic. The config file, model provider, ffmpeg and --out are checked before recording starts; a later failure keeps the capture and prints where. Then, on this machine: transcription (the configured engine; skipped when the capture has no audio track), key moments (rules for highlights, drawings, clicks and pointer rests, plus spoken references when a model provider is configured), one frame per moment, and an AREC 1.4 folder: recording.mp4, transcript.json, moments.json, frames/, recording.arec. Notes become narration in the transcript and a key moment each. Default folder ~/clipy/recordings/<YYYY-MM-DD-HHMMSS>/ (mode 0700), or --out; an --out that holds files is refused (exit 2) unless --force, which replaces the previous take's files there. The last stdout line is the absolute recording.arec path; --json prints {ok:true, local:true, arec, dir, video, durationMs, moments, frames, planner, transcript:{engine,segments}, warnings}; a failure prints {ok:false, local:true, error, keptVideo?}. A Clipy Local take prints {ok, local:true, app:\"Clipy Local\", arec, arecPath, dir, out, video, status (ready, failed, or the stage still running when the 300 s processing wait ran out, with timedOut:true), message, recordingId, sizeBytes, autoStopped, captureMode:\"mac-screen\", source, audio}; status failed exits 1 and still prints the Partial AREC path. Data boundary: with no provider (or Ollama/LM Studio) and on-device transcription, nothing leaves the machine; with a model provider, the transcript text, click labels and a bounded sample of pointer and key events go to it; with a transcription key, the audio goes to that provider. The video and screenshots never leave the machine. Share later with `clipy upload <dir>/recording.mp4` (needs an account; watching needs no signup).",
+        "Local mode: no Clipy account and nothing uploaded. The capture is the same as without --local (with --url the headless browser capture, silent; with --source screen on Linux the X11 recorder, timed by --for or --max; with --source screen or mac-screen on macOS, the Mac app records through its agent bridge for --for or --max seconds (default 15, cap 1740; Ctrl-C stops early and keeps the take): Clipy Local, the open-source local edition, when it is running, otherwise the official Clipy app when it can keep a take on this computer (bridge protocol 4; an older official app is never used, since it would upload), and a clear message when neither can; --window and --display name a window or display that app can see; --out and --force do not apply because the app keeps each take in its own folder); with no --url and no --source, or --source screen on Windows, the CLI's local screen recorder (ffmpeg) runs until Enter, Ctrl-C, SIGTERM, SIGHUP or --max (with no --max and stdin not a terminal, also until stdin closes, with a warning), with the microphone only on --mic. The config file, model provider, ffmpeg and --out are checked before recording starts; a later failure keeps the capture and prints where. Then, on this machine: transcription (the configured engine; skipped when the capture has no audio track), key moments (rules for highlights, drawings, clicks and pointer rests, plus spoken references when a model provider is configured), one frame per moment, and an AREC 1.4 folder: recording.mp4, transcript.json, moments.json, frames/, recording.arec. Notes become narration in the transcript and a key moment each. Default folder ~/clipy/recordings/<YYYY-MM-DD-HHMMSS>/ (mode 0700), or --out; an --out that holds files is refused (exit 2) unless --force, which replaces the previous take's files there. The last stdout line is the absolute recording.arec path; --json prints {ok:true, local:true, arec, dir, video, durationMs, moments, frames, planner, transcript:{engine,segments}, warnings}; a failure prints {ok:false, local:true, error, keptVideo?}. A Mac app take prints {ok, local:true, app:\"Clipy Local\" or \"Clipy\", arec, arecPath, dir, out, video, status (ready, failed, or the stage still running when the 300 s processing wait ran out, with timedOut:true), message, recordingId, sizeBytes, autoStopped, captureMode:\"mac-screen\", source, audio}; status failed exits 1 and still prints the Partial AREC path. Data boundary: with no provider (or Ollama/LM Studio) and on-device transcription, nothing leaves the machine; with a model provider, the transcript text, click labels and a bounded sample of pointer and key events go to it; with a transcription key, the audio goes to that provider. A Mac take through the official Clipy app sends the transcript text, click labels, a bounded sample of pointer and key events and the capture size to Clipy to pick the key moments (Clipy Local sends nothing). The video and screenshots never leave the machine. Share later with `clipy upload <dir>/recording.mp4` (needs an account; watching needs no signup).",
         ["--local", "--max", "--for", "--mic", "--virtual-display", "--display", "--window", "--url", "--source", "--note", "--title", "--description", "--type", "--expected", "--width", "--height", "--out", "--force", "--json"],
       ),
       cmdDoc(
         "session start --local",
         "clipy session start [--url <u>] [--source web|screen|chrome-for-clipy] --local [--out dir] [--force] [--max sec] [--json]",
-        "Same lifecycle as session start (mark, chapter, stop, abort, run), but `session stop` builds the AREC on this machine instead of uploading; marks become narration and key moments. Works for headless web, --source screen on Linux, chrome-for-clipy, and --source screen or mac-screen on macOS, which drives Clipy Local (the open-source local edition of the Mac app) through its agent bridge: never the official Clipy app, no sign-in, marks and chapters become narration in its transcript and a key moment each, start --json returns {state, local:true, app:\"Clipy Local\", recordingId, arec, out, source, audio}, and stop waits up to 300 s for Clipy Local to finish processing and prints the Clipy Local result described under record --local (--out and --force do not apply). Refused for chrome-extension. Otherwise start checks the config, model provider and ffmpeg, and claims the output folder, so two sessions never share one. start --json adds {local:true, out}; stop prints the same result as record --local. `session stop --local` and `session status --local` exit 2 on a session started without --local (it would upload; discard it with session abort).",
+        "Same lifecycle as session start (mark, chapter, stop, abort, run), but `session stop` builds the AREC on this machine instead of uploading; marks become narration and key moments. Works for headless web, --source screen on Linux, chrome-for-clipy, and --source screen or mac-screen on macOS, which drives the Mac app through its agent bridge (Clipy Local when it is running, with no sign-in; otherwise the official Clipy app when it can keep a take on this computer, signed in): marks and chapters become narration in its transcript and a key moment each, start --json returns {state, local:true, app:\"Clipy Local\" or \"Clipy\", recordingId, arec, out, source, audio}, and stop waits up to 300 s for the app to finish processing and prints the Mac app result described under record --local (--out and --force do not apply). Refused for chrome-extension. Otherwise start checks the config, model provider and ffmpeg, and claims the output folder, so two sessions never share one. start --json adds {local:true, out}; stop prints the same result as record --local. `session stop --local` and `session status --local` exit 2 on a session started without --local (it would upload; discard it with session abort).",
         ["--local", "--out", "--force", "--url", "--source", "--max", "--json"],
       ),
       cmdDoc(
@@ -9446,8 +9470,7 @@ async function main(): Promise<void> {
         printLinuxSources(listLinuxSources(xDisplay), json);
         return;
       }
-      if (process.platform === "win32" && !process.env.CLIPY_BRIDGE_FILE?.trim()) die(WINDOWS_SCREEN_REFUSAL);
-      // Enumerate what the Mac app can capture, so --window/--display have ids.
+      // Enumerate what the desktop app can capture, so --window/--display have ids.
       try {
         const sources = await listSources(readBridgeInfo());
         printBridgeSources(sources, json, 'record one with: clipy record --source mac-screen --window "<title or id>"');
@@ -9501,7 +9524,7 @@ async function main(): Promise<void> {
       }
       const source = normalizeScreenSource(String(values.source ?? "web"));
       if (source !== "web" && !isScreenSource(source)) {
-        die("--source must be web (headless browser) or screen (the real screen: the Clipy Mac app on macOS, the CLI's own recorder on Linux)", 2);
+        die("--source must be web (headless browser) or screen (the real screen: the Clipy desktop app on macOS and Windows, the CLI's own recorder on Linux)", 2);
       }
       if ((values.window || values.display) && !isScreenSource(source)) {
         die("--window/--display record the real screen: add --source screen", 2);
@@ -9633,13 +9656,13 @@ async function main(): Promise<void> {
         if (localMac && !bridgeApplicable("local")) die(LOCAL_MAC_PLATFORM, 2);
         if (localMac && (values.out || values.force)) die(LOCAL_MAC_OUT, 2);
         if (values.local && values.source === "screen" && process.platform === "win32") {
-          die("clipy session --local cannot record the Windows screen yet; use clipy record --local (Enter or Ctrl-C to stop), --url, or --source chrome-for-clipy", 2);
+          die("clipy session --local --source screen does not drive the Windows app; use --source mac-screen to record through the Clipy Windows app, or clipy record --local (Enter or Ctrl-C to stop)", 2);
         }
         if (values.local && values.source === "chrome-extension") die(LOCAL_EXTENSION_REFUSAL, 2);
         const source = localMac ? "mac-screen" : normalizeScreenSource(String(values.source ?? "web"));
         if (source !== "web" && !isScreenSource(source) && source !== "chrome-for-clipy" && source !== "chrome-extension") {
           die(
-            "--source must be web (headless browser), screen (the real screen: the Clipy Mac app on macOS, the CLI's own recorder on Linux), chrome-for-clipy (the persistent automation browser), or chrome-extension (the Clipy extension inside Chrome for Clipy)",
+            "--source must be web (headless browser), screen (the real screen: the Clipy desktop app on macOS and Windows, the CLI's own recorder on Linux), chrome-for-clipy (the persistent automation browser), or chrome-extension (the Clipy extension inside Chrome for Clipy)",
             2,
           );
         }

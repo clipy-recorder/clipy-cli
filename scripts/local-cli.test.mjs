@@ -379,8 +379,9 @@ for (const profile of PROFILES) describe(`local runs never touch the network (${
  * response line out, every request kept. `edition` is what its discovery file
  * says; the file is written to `file`.
  */
-async function fakeBridge(file, edition, stopped = { status: "ready", message: "Ready" }) {
+async function fakeBridge(file, edition, stopped = { status: "ready", message: "Ready" }, { localTakes = false, echoLocal = true } = {}) {
   const requests = [];
+  let localTake = edition === "local";
   const dir = tempDir("clipy-lb-");
   const socketPath = join(dir, "b.sock");
   const take = join(dir, "local-recordings", "8c1f2d0e-1111-4222-8333-944455556666");
@@ -397,18 +398,19 @@ async function fakeBridge(file, edition, stopped = { status: "ready", message: "
       if (req.cmd === "status") return reply({ appVersion: "0.9.0", protocolVersion: 3, edition, agentSession: { elapsedSec: 1, maxSec: 60, marks: 0 } });
       if (req.cmd === "sources") return reply({ displays: [{ id: 1, name: "Built-in", width: 1512, height: 982 }], windows: [] });
       if (req.cmd === "start") {
+        localTake = edition === "local" || (localTakes && req.local === true && echoLocal);
         return reply({
           recordingId: "8c1f2d0e-1111-4222-8333-944455556666",
           maxSec: req.maxSec,
           state: "recording",
           audio: { includeSystemAudio: req.audio?.includeSystemAudio ?? true, includeMic: req.audio?.includeMic ?? false, micDeviceId: null },
-          ...(edition === "local" ? { local: true, arecPath: join(take, "recording.arec"), directory: take } : {}),
+          ...(localTake ? { local: true, arecPath: join(take, "recording.arec"), directory: take } : {}),
         });
       }
       if (req.cmd === "mark") return reply({ atSeconds: 1.2, totalMarks: requests.filter((r) => r.cmd === "mark").length });
       if (req.cmd === "stop") {
         return reply(
-          edition === "local"
+          localTake
             ? { local: true, recordingId: "8c1f2d0e-1111-4222-8333-944455556666", arecPath: join(take, "recording.arec"), directory: take, ...stopped, autoStopped: false, sizeBytes: 4096 }
             : { publicId: "pub", shareUrl: "https://clipy.online/video/pub", autoStopped: false, sizeBytes: 1 },
         );
@@ -419,7 +421,10 @@ async function fakeBridge(file, edition, stopped = { status: "ready", message: "
   });
   await new Promise((r) => server.listen(socketPath, r));
   mkdirSync(join(file, ".."), { recursive: true });
-  writeFileSync(file, JSON.stringify({ socketPath, token: "tok", pid: process.pid, appVersion: "0.9.0", protocolVersion: 3, edition }));
+  writeFileSync(
+    file,
+    JSON.stringify({ socketPath, token: "tok", pid: process.pid, appVersion: "0.9.0", protocolVersion: localTakes ? 4 : 3, edition, ...(localTakes ? { localTakes: true } : {}) }),
+  );
   return { requests, take, close: () => new Promise((r) => server.close(() => r())) };
 }
 
@@ -447,6 +452,7 @@ describe("Clipy Local through its agent bridge (--source mac-screen --local)", (
       assert.equal(r.code, 1, r.stdout + r.stderr);
       assert.match(r.stderr, /Clipy Local is not running/);
       assert.match(r.stderr, /Open Clipy Local/);
+      assert.match(r.stderr, /cannot keep a recording on this computer/, "an official app without local takes is never used");
     } else {
       assert.equal(r.code, 2, r.stdout + r.stderr);
       assert.match(r.stderr, /Clipy Local, which runs on macOS/);
@@ -570,6 +576,86 @@ describe("Clipy Local through its agent bridge (--source mac-screen --local)", (
       await app.close();
       rmSync(localFile, { force: true });
     }
+  });
+});
+
+describe("the official app keeps a take on this computer (--local, bridge protocol 4)", { skip: process.platform !== "darwin" && "the official app runs on macOS" }, () => {
+  const appSupport = join(home, "Library", "Application Support");
+  const localFile = join(appSupport, "Clipy Local", "agent-bridge.json");
+  const officialFile = join(appSupport, "Clipy", "agent-bridge.json");
+
+  it("a session asks for a local take, and stop returns the AREC with nothing uploaded", async () => {
+    rmSync(localFile, { force: true });
+    const app = await fakeBridge(officialFile, "cloud", undefined, { localTakes: true });
+    const cwd = tempDir("clipy-official-local-");
+    try {
+      const start = await runCli(["session", "start", "--local", "--source", "mac-screen", "--mic", "--max", "120", "--json"], { cwd });
+      assert.equal(start.code, 0, start.stderr);
+      const started = JSON.parse(start.stdout);
+      assert.equal(started.local, true);
+      assert.equal(started.app, "Clipy");
+      assert.equal(started.arec, join(app.take, "recording.arec"));
+      const startReq = app.requests.find((r) => r.cmd === "start");
+      assert.equal(startReq.local, true, "the official app is asked for a local take");
+      assert.equal(startReq.audio.includeMic, true);
+
+      const mark = await runCli(["mark", "Opened the settings"], { cwd });
+      assert.equal(mark.code, 0, mark.stderr);
+      const stop = await runCli(["session", "stop", "--local", "--json"], { cwd });
+      assert.equal(stop.code, 0, stop.stderr);
+      const result = JSON.parse(stop.stdout);
+      assert.equal(result.local, true);
+      assert.equal(result.app, "Clipy");
+      assert.equal(result.status, "ready");
+      assert.equal(result.arec, join(app.take, "recording.arec"));
+      assert.equal(result.shareUrl, undefined, "a local take has no share link");
+      assertNoNetwork();
+    } finally {
+      await app.close();
+      rmSync(officialFile, { force: true });
+    }
+  });
+
+  it("Clipy Local still wins when both apps are running", async () => {
+    const official = await fakeBridge(officialFile, "cloud", undefined, { localTakes: true });
+    const local = await fakeBridge(localFile, "local");
+    try {
+      const r = await runCli(["record", "--local", "--source", "mac-screen", "--for", "1", "--json"]);
+      assert.equal(r.code, 0, r.stderr);
+      assert.equal(JSON.parse(r.stdout).app, "Clipy Local");
+      assert.deepEqual(official.requests, []);
+    } finally {
+      await local.close();
+      await official.close();
+      rmSync(localFile, { force: true });
+      rmSync(officialFile, { force: true });
+    }
+  });
+
+  it("a start that does not come back local is discarded, never uploaded", async () => {
+    rmSync(localFile, { force: true });
+    const app = await fakeBridge(officialFile, "cloud", undefined, { localTakes: true, echoLocal: false });
+    const cwd = tempDir("clipy-official-upload-");
+    try {
+      const r = await runCli(["session", "start", "--local", "--source", "mac-screen", "--json"], { cwd });
+      assert.equal(r.code, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, /discarded/);
+      assert.deepEqual(app.requests.map((q) => q.cmd).filter((c) => c !== "sources"), ["start", "abort"]);
+      const stop = await runCli(["session", "stop", "--json"], { cwd });
+      assert.notEqual(stop.code, 0, "no session is left to stop and upload");
+      assert.ok(!app.requests.some((q) => q.cmd === "stop"));
+    } finally {
+      await app.close();
+      rmSync(officialFile, { force: true });
+    }
+  });
+
+  it("with neither app running, says to open Clipy", async () => {
+    rmSync(localFile, { force: true });
+    rmSync(officialFile, { force: true });
+    const r = await runCli(["session", "start", "--local", "--source", "mac-screen"]);
+    assert.equal(r.code, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /Neither the Clipy app nor Clipy Local is running/);
   });
 });
 

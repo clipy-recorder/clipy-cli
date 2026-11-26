@@ -189,6 +189,7 @@ const TRANSCRIPT_SOURCE_TEXT: Record<NormalizedTranscript['source'], string> = {
     'provider auto-generated captions, machine-translated from another language',
   user_file: 'a caption file supplied by the user',
   local_stt: 'local speech-to-text on the user’s machine',
+  server_stt: 'speech-to-text on Clipy’s servers, from the uploaded file',
   none: 'none — the source published no transcript',
 };
 

@@ -10,8 +10,14 @@
  *
  * Clipy Local (the open-source local edition) runs the same bridge and writes
  * ~/Library/Application Support/Clipy Local/agent-bridge.json with
- * `edition: "local"`. Only `--local` commands read that file, and they never
- * read the official app's: the official app uploads, Clipy Local never does.
+ * `edition: "local"`. Only `--local` commands read that file.
+ *
+ * `--local` takes go to Clipy Local when it is running, and otherwise to the
+ * official app when its discovery file says `localTakes: true` (bridge
+ * protocol 4). Every request to the official app for such a take carries
+ * `local: true`, and `start` must echo `local: true` back: an older official
+ * app ignores the flag and uploads, so a `--local` command never trusts it
+ * without that echo.
  */
 
 import { readFileSync, statSync } from "node:fs";
@@ -30,9 +36,18 @@ export interface BridgeInfo {
   protocolVersion: number;
   /** Absent in files written before the local edition existed: the official app. */
   edition?: BridgeEdition;
+  /** The official app can keep a take on this computer (`start` with `local: true`). */
+  localTakes?: boolean;
+  /** This info drives a take kept on this computer: Clipy Local's, or the official app's on request. */
+  localTake?: boolean;
 }
 
-export class BridgeUnavailableError extends Error {}
+export class BridgeUnavailableError extends Error {
+  /** `not_running`: no app answers at all (no discovery file, or its process has quit). */
+  constructor(message: string, readonly reason?: "not_running") {
+    super(message);
+  }
+}
 
 const REQUEST_TIMEOUT_MS = 15_000;
 /** stop waits for the streaming upload to hand back the share link. */
@@ -42,6 +57,9 @@ const LOCAL_STOP_TIMEOUT_MS = 330_000;
 
 export const LOCAL_APP_HINT =
   "Open Clipy Local (build it from the open-source Clipy repository), or record with the CLI's own recorder: clipy record --local --max 60";
+
+const LOCAL_TAKES_UPDATE_HINT =
+  "Update Clipy from https://clipy.online/download to record local takes with it";
 
 /** The oldest Clipy Mac app version that ships the agent bridge this CLI drives.
  *  Older builds either don't write the discovery file at all or wrote it to a
@@ -53,24 +71,46 @@ export const MIN_BRIDGE_APP_VERSION = "0.1.41";
 const UPDATE_HINT =
   "your installed Clipy app may predate the agent bridge — update via https://clipy.online/download";
 
-export function bridgeFilePath(edition: BridgeEdition = "cloud"): string {
-  if (edition === "local") {
-    if (process.env.CLIPY_LOCAL_BRIDGE_FILE?.trim()) return process.env.CLIPY_LOCAL_BRIDGE_FILE;
-    return join(homedir(), "Library", "Application Support", "Clipy Local", "agent-bridge.json");
-  }
-  if (process.env.CLIPY_BRIDGE_FILE?.trim()) return process.env.CLIPY_BRIDGE_FILE;
-  return join(homedir(), "Library", "Application Support", "Clipy", "agent-bridge.json");
+/** Where the desktop apps keep their per-user data: the parent of the
+ *  `Clipy` and `Clipy Local` discovery folders. */
+function appSupportDir(platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32") return process.env.APPDATA?.trim() || join(homedir(), "AppData", "Roaming");
+  return join(homedir(), "Library", "Application Support");
 }
 
-/** Whether an app could answer for this edition here: macOS, or an explicit file. */
+export function bridgeFilePath(edition: BridgeEdition = "cloud", platform: NodeJS.Platform = process.platform): string {
+  if (edition === "local") {
+    if (process.env.CLIPY_LOCAL_BRIDGE_FILE?.trim()) return process.env.CLIPY_LOCAL_BRIDGE_FILE;
+    return join(appSupportDir(platform), "Clipy Local", "agent-bridge.json");
+  }
+  if (process.env.CLIPY_BRIDGE_FILE?.trim()) return process.env.CLIPY_BRIDGE_FILE;
+  return join(appSupportDir(platform), "Clipy", "agent-bridge.json");
+}
+
+/** The desktop app (Mac or Windows) can answer here without an explicit file. */
+function desktopAppPlatform(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "darwin" || platform === "win32";
+}
+
+/** Whether an app could answer for this edition here: macOS or Windows, or an explicit file. */
 export function bridgeApplicable(edition: BridgeEdition, platform: NodeJS.Platform = process.platform): boolean {
   const override = edition === "local" ? process.env.CLIPY_LOCAL_BRIDGE_FILE : process.env.CLIPY_BRIDGE_FILE;
-  return platform === "darwin" || !!override?.trim();
+  return desktopAppPlatform(platform) || !!override?.trim();
 }
 
 /** How errors name the app on the other end of the socket. */
 export function bridgeAppName(info: Pick<BridgeInfo, "edition">): string {
   return info.edition === "local" ? "Clipy Local" : "the Clipy app";
+}
+
+/** Whether a take through this app stays on this computer. */
+export function isLocalTake(info: Pick<BridgeInfo, "edition" | "localTake">): boolean {
+  return info.edition === "local" || info.localTake === true;
+}
+
+/** The app's name as a --local result reports it (`app` in --json). */
+export function localTakeAppName(info: Pick<BridgeInfo, "edition">): string {
+  return info.edition === "local" ? "Clipy Local" : "Clipy";
 }
 
 /** Numeric-dotted version compare: a<b → -1, a==b → 0, a>b → 1. Missing/short
@@ -108,11 +148,11 @@ function pidAlive(pid: number): boolean {
  *  hint when the app looks too old) so an agent hitting a dead end can see what
  *  was actually found and self-correct. */
 export function readBridgeInfo(edition: BridgeEdition = "cloud"): BridgeInfo {
-  if (edition === "local") return readLocalBridgeInfo();
+  if (edition === "local") return readLocalTakeBridgeInfo();
   const path = bridgeFilePath();
-  if (process.platform !== "darwin" && !process.env.CLIPY_BRIDGE_FILE) {
+  if (!desktopAppPlatform() && !process.env.CLIPY_BRIDGE_FILE) {
     throw new BridgeUnavailableError(
-      "--source mac-screen records through the Clipy Mac app, which only runs on macOS.",
+      "--source mac-screen records through the Clipy desktop app, which runs on macOS and Windows.",
     );
   }
   let raw: string;
@@ -123,6 +163,7 @@ export function readBridgeInfo(edition: BridgeEdition = "cloud"): BridgeInfo {
       `the Clipy app is not running: no agent bridge file at ${path}. ` +
         `Open Clipy (or install it from https://clipy.online/download). ` +
         `If Clipy IS running, ${UPDATE_HINT}.`,
+      "not_running",
     );
   }
   let info: BridgeInfo;
@@ -157,6 +198,7 @@ export function readBridgeInfo(edition: BridgeEdition = "cloud"): BridgeInfo {
       `stale agent bridge at ${path}: pid ${info.pid} is not running (dead)` +
         `${info.appVersion ? `, appVersion ${info.appVersion}` : ""} — the Clipy app has quit. ` +
         `Open Clipy and try again.`,
+      "not_running",
     );
   }
   if (info.edition === "local") {
@@ -166,7 +208,44 @@ export function readBridgeInfo(edition: BridgeEdition = "cloud"): BridgeInfo {
       `the agent bridge at ${path} is Clipy Local's, which keeps recordings on this computer and never uploads. Add --local.`,
     );
   }
-  return { ...info, edition: "cloud" };
+  // localTake is decided by the caller, never read from the file.
+  return { ...info, edition: "cloud", localTake: false };
+}
+
+/**
+ * The app for a `--local` take: Clipy Local when it is running, otherwise the
+ * official app when it can keep a take on this computer. An official app that
+ * cannot (before bridge protocol 4) is never used, since it would upload.
+ */
+function readLocalTakeBridgeInfo(): BridgeInfo {
+  let localError: BridgeUnavailableError;
+  try {
+    return readLocalBridgeInfo();
+  } catch (e) {
+    if (!(e instanceof BridgeUnavailableError)) throw e;
+    localError = e;
+  }
+  if (!bridgeApplicable("cloud")) throw localError;
+  let official: BridgeInfo;
+  try {
+    official = readBridgeInfo("cloud");
+  } catch (e) {
+    if (!(e instanceof BridgeUnavailableError)) throw e;
+    if (e.reason === "not_running") {
+      throw new BridgeUnavailableError(
+        `Neither the Clipy app nor Clipy Local is running. Open Clipy (or install it from https://clipy.online/download) and try again. (${localError.message})`,
+        "not_running",
+      );
+    }
+    // The official app is there but cannot be used (too old, a broken file): say why.
+    throw new BridgeUnavailableError(`${localError.message} The Clipy app cannot record this take: ${e.message}`);
+  }
+  if (official.localTakes !== true) {
+    throw new BridgeUnavailableError(
+      `${localError.message} The Clipy app${official.appVersion ? ` (v${official.appVersion})` : ""} is running but cannot keep a recording on this computer. ${LOCAL_TAKES_UPDATE_HINT}.`,
+    );
+  }
+  return { ...official, localTake: true };
 }
 
 /** readBridgeInfo for Clipy Local: its own discovery file, never the official app's. */
@@ -174,7 +253,7 @@ function readLocalBridgeInfo(): BridgeInfo {
   const path = bridgeFilePath("local");
   if (!bridgeApplicable("local")) {
     throw new BridgeUnavailableError(
-      "--source mac-screen with --local records through Clipy Local, which runs on macOS. Record with the CLI's own recorder instead: clipy record --local --max 60",
+      "--source mac-screen with --local records through the Clipy desktop app, which runs on macOS and Windows. Record with the CLI's own recorder instead: clipy record --local --max 60",
     );
   }
   let raw: string;
@@ -290,7 +369,7 @@ export interface BridgeDiagnostics {
 
 export function inspectBridge(): BridgeDiagnostics {
   const path = bridgeFilePath();
-  const applicable = process.platform === "darwin" || !!process.env.CLIPY_BRIDGE_FILE?.trim();
+  const applicable = desktopAppPlatform() || !!process.env.CLIPY_BRIDGE_FILE?.trim();
   const base: BridgeDiagnostics = {
     path,
     applicable,
@@ -556,9 +635,13 @@ export function bridgeRequest(
   cmd: string,
   args: Record<string, unknown> = {},
 ): Promise<Record<string, unknown>> {
-  const local = info.edition === "local";
+  const local = isLocalTake(info);
+  const localApp = info.edition === "local";
   const app = bridgeAppName(info);
+  const appTitle = localApp ? "Clipy Local" : "The Clipy app";
   const timeoutMs = cmd === "stop" ? (local ? LOCAL_STOP_TIMEOUT_MS : STOP_TIMEOUT_MS) : REQUEST_TIMEOUT_MS;
+  // The official app keeps a take on this computer only when asked, on every start.
+  const payload = cmd === "start" && local && !localApp ? { ...args, local: true } : args;
   return new Promise((resolvePromise, reject) => {
     const socket = createConnection({ path: info.socketPath });
     let buffer = "";
@@ -571,9 +654,9 @@ export function bridgeRequest(
           new Error(
             cmd === "stop"
               ? local
-                ? "Clipy Local did not finish processing in time. Check the app; the take is still being processed and its recording.arec updates in place"
+                ? `${appTitle} did not finish processing in time. Check the app; the take is still being processed and its recording.arec updates in place`
                 : "the Clipy app did not finish the upload in time — check the app; the recording may still complete in the background"
-              : local
+              : localApp
                 ? `Clipy Local did not answer (${cmd}). Is it responding?`
                 : `the Clipy app did not answer (${cmd}) — is it responding?`,
           ),
@@ -588,7 +671,7 @@ export function bridgeRequest(
       reject(
         e.code === "ENOENT" || e.code === "ECONNREFUSED"
           ? new BridgeUnavailableError(
-              local
+              localApp
                 ? `Clipy Local is not running (agent bridge socket unavailable). ${LOCAL_APP_HINT}.`
                 : "the Clipy app is not running (agent bridge socket unavailable). Open Clipy and try again.",
             )
@@ -596,7 +679,7 @@ export function bridgeRequest(
       );
     });
     socket.on("connect", () => {
-      socket.write(`${JSON.stringify({ token: info.token, cmd, ...args })}\n`);
+      socket.write(`${JSON.stringify({ token: info.token, cmd, ...payload })}\n`);
     });
     socket.on("data", (chunk) => {
       buffer += chunk.toString("utf8");
@@ -614,7 +697,7 @@ export function bridgeRequest(
           reject(new Error(parsed.error?.message ?? "bridge error"));
         }
       } catch {
-        reject(new Error(`unparseable response from the ${local ? "Clipy Local" : "Clipy app"} bridge`));
+        reject(new Error(`unparseable response from the ${localApp ? "Clipy Local" : "Clipy app"} bridge`));
       }
     });
     socket.on("close", () => {
