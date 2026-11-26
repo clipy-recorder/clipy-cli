@@ -15,16 +15,24 @@
 import { join } from "node:path";
 import { mcpSnippetFor, registerConfigMcpServer } from "./setupConfig.js";
 import {
+  CLIPY_MARKETPLACE_NAME,
+  CLIPY_MARKETPLACE_SOURCE,
+  CLIPY_PLUGINS,
   MCP_ARGS,
   MCP_COMMAND,
   MCP_SERVER_NAME,
+  type CommandResult,
   type McpRegistration,
+  type PluginInstall,
+  type PluginSetup,
   type SetupEnv,
   type SetupTarget,
 } from "./setupTypes.js";
 
 export { mcpSnippetFor } from "./setupConfig.js";
 export {
+  CLIPY_PLUGIN_LABELS,
+  CLIPY_PLUGINS,
   isSetupTarget,
   MCP_ARGS,
   MCP_COMMAND,
@@ -33,6 +41,7 @@ export {
   type CommandResult,
   type McpMethod,
   type McpRegistration,
+  type PluginSetup,
   type SetupEnv,
   type SetupTarget,
 } from "./setupTypes.js";
@@ -210,6 +219,71 @@ function containsOfficialCommand(value: unknown): boolean {
     return true;
   }
   return Object.values(record).some(containsOfficialCommand);
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code plugins
+// ---------------------------------------------------------------------------
+
+/** The last JSON line `claude plugin … --json` prints, if any. */
+function lastJsonLine(stdout: string): Record<string, unknown> | null {
+  const lines = stdout.trim().split("\n").reverse();
+  for (const line of lines) {
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
+    } catch {
+      // not the result line
+    }
+  }
+  return null;
+}
+
+/** A command's failure as one line: its JSON message, else its first output line. */
+function failureLine(result: CommandResult, parsed: Record<string, unknown> | null, fallback: string): string {
+  if (result.spawnError) return "the `claude` command is not on PATH";
+  if (typeof parsed?.message === "string" && parsed.message) return parsed.message.split("\n").pop() ?? parsed.message;
+  return (result.stderr || result.stdout).trim().split("\n")[0] || fallback;
+}
+
+export function manualPluginCommand(): string {
+  const installs = CLIPY_PLUGINS.map((name) => `claude plugin install ${name}@${CLIPY_MARKETPLACE_NAME}`);
+  return [`claude plugin marketplace add ${CLIPY_MARKETPLACE_SOURCE}`, ...installs].join(" && ");
+}
+
+/**
+ * Adds the Clipy marketplace to Claude Code and installs its plugins (/record,
+ * /watch) at user scope, through Claude Code's own `plugin` commands. Both are
+ * idempotent there, so re-running setup is safe. Never throws: the outcome is
+ * reported, and a failure here never fails the rest of setup.
+ */
+export async function installClaudePlugins(env: SetupEnv): Promise<PluginSetup> {
+  const added = await env.run("claude", ["plugin", "marketplace", "add", CLIPY_MARKETPLACE_SOURCE, "--json"]);
+  const addedJson = lastJsonLine(added.stdout);
+  if (added.code !== 0 || (addedJson && addedJson.outcome !== "ok")) {
+    return {
+      ok: false,
+      marketplace: { added: false, error: failureLine(added, addedJson, "could not add the Clipy marketplace") },
+      plugins: CLIPY_PLUGINS.map((name) => ({ name, installed: false, alreadyInstalled: false })),
+      command: manualPluginCommand(),
+    };
+  }
+
+  const plugins: PluginInstall[] = [];
+  for (const name of CLIPY_PLUGINS) {
+    const result = await env.run("claude", ["plugin", "install", `${name}@${CLIPY_MARKETPLACE_NAME}`, "--scope", "user", "--json"]);
+    const parsed = lastJsonLine(result.stdout);
+    const ok = result.code === 0 && (!parsed || parsed.outcome === "ok");
+    const message = typeof parsed?.message === "string" ? parsed.message : "";
+    plugins.push({
+      name,
+      installed: ok,
+      alreadyInstalled: ok && /already installed/i.test(message),
+      ...(ok ? {} : { error: failureLine(result, parsed, `could not install ${name}`) }),
+    });
+  }
+  const ok = plugins.every((p) => p.installed);
+  return { ok, marketplace: { added: true }, plugins, ...(ok ? {} : { command: manualPluginCommand() }) };
 }
 
 // ---------------------------------------------------------------------------

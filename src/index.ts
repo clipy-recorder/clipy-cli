@@ -33,6 +33,9 @@ import {
   detectSetupTarget,
   isSetupTarget,
   type McpRegistration,
+  CLIPY_PLUGIN_LABELS,
+  installClaudePlugins,
+  type PluginSetup,
   registerMcpServer,
   renderSetupBox,
   shortPath,
@@ -919,7 +922,7 @@ ${c.bold("LOCAL")} ${c.dim("(--local: no Clipy account, nothing uploaded)")}
   ${c.dim("Want a share link anyone can watch, with no signup to watch? clipy upload <file>.")}
 
 ${c.bold("AGENTS")}
-  setup [claude|codex|cursor|windsurf|opencode] [--with-browser]
+  setup [claude|codex|cursor|windsurf|opencode] [--with-browser] [--no-plugins]
                                     Wire Clipy into a coding agent in ONE command:
                                     sign in, install the skill, and register the MCP
                                     server in that agent's own config. Detects the
@@ -928,6 +931,9 @@ ${c.bold("AGENTS")}
                                     agent-owned automation browser) and installs its
                                     launcher on macOS; a browser failure never fails
                                     setup.
+                                    For claude, also installs the Clipy plugins
+                                    /record, /watch and the Record button from the
+                                    Clipy marketplace (--no-plugins skips them).
                                     ${c.dim("Published instructions: clipy.online/agent-setup/prompt.md")}
   agents install <claude|codex|cursor|windsurf|opencode>
                                     Skill only — no MCP, no login prompt beyond the
@@ -8115,6 +8121,7 @@ async function cmdSetup(
   targetRaw: string | undefined,
   json: boolean,
   withBrowser: boolean,
+  withPlugins = true,
 ): Promise<void> {
   const env = realSetupEnv();
   let target: SetupTarget | undefined;
@@ -8247,6 +8254,13 @@ async function cmdSetup(
     browser = { ok: chrome.running, chrome };
   }
 
+  // Claude Code also gets the Clipy plugins (/record, /watch) from the Clipy
+  // marketplace. Like the browser, a failure here never fails core setup.
+  let plugins: PluginSetup | null = null;
+  if (target === "claude" && withPlugins) {
+    plugins = await installClaudePlugins(env);
+  }
+
   if (json) {
     printJson({
       ok: true,
@@ -8256,6 +8270,7 @@ async function cmdSetup(
       authenticated: true,
       restartRequired: true,
       ...(browser ? { browser } : {}),
+      ...(plugins ? { plugins } : {}),
       docs: "https://clipy.online/agent-setup/prompt.md",
     });
     return;
@@ -8274,8 +8289,24 @@ async function cmdSetup(
         : `✗ Chrome  ${browser.chrome.error ?? `${CHROME_FOR_CLIPY_APP_NAME} did not start`}`,
     );
   }
+  if (plugins) {
+    const names = plugins.plugins
+      .filter((p) => p.installed)
+      .map((p) => CLIPY_PLUGIN_LABELS[p.name as keyof typeof CLIPY_PLUGIN_LABELS] ?? p.name);
+    const listed = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names.join("");
+    rows.push(
+      plugins.ok
+        ? `✓ Plugins ${listed}`
+        : `✗ Plugins ${plugins.marketplace.error ?? plugins.plugins.find((p) => p.error)?.error ?? "not installed"}`,
+    );
+    if (!plugins.ok && plugins.command) rows.push("  To install them by hand, run the command below.");
+  }
   rows.push("", "→ Restart your agent to load the MCP server");
   process.stdout.write(`${renderSetupBox("Clipy setup complete", rows)}\n`);
+  // Outside the box, which clips long rows: the whole command, ready to copy.
+  if (plugins && !plugins.ok && plugins.command) {
+    process.stdout.write(`\n${plugins.command.split(" && ").join(" && \\\n  ")}\n`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -8677,9 +8708,9 @@ function cmdGuide(json: boolean): void {
       cmdDoc("sources", "clipy sources [--x-display :N] [--json]", "List displays + windows that --source screen can capture (the Clipy Mac app's on macOS; the X display's on Linux, where listing windows needs x11-utils) — ids feed --window/--display. --json gives each entry a `source` {kind,id,title} in the SAME shape session start/record report for the resolved capture, so a caller can compare what it picked against what the camera reports without transforming either."),
       cmdDoc(
         "setup",
-        "clipy setup [claude|codex|cursor|windsurf|opencode] [--with-browser] [--json]",
-        "Wire Clipy into one coding agent in a single command: sign in if needed, install the bundled skill, and register the MCP server in that agent's own config (`claude`/`codex` through their own `mcp add`; `cursor`/`windsurf`/`opencode` by merging their JSON config, never replacing other servers). Omit the agent to auto-detect from the environment — ambiguous or unknown exits 2 rather than guessing. Re-running is safe. Successful --json output is {ok:true, target, skill:{installed,path}, mcp:{method,path,changed,alreadyPresent}, authenticated:true, restartRequired:true}. Failures use {ok:false,code,error,remediation,partial}; partial.mcp.method 'manual' means the caller must run partial.mcp.command or paste partial.mcp.snippet before setup is complete. The MCP server is read at agent startup, so the calling session will not see the tools until it restarts. --with-browser additionally provisions Chrome for Clipy, the agent-owned automation browser (see chrome): on macOS it installs the launcher app once, then it starts the instance. Its outcome is reported under a `browser` key ({ok, chrome:{appInstalled, appPath?, running, error?}}) and a browser failure never fails core setup.",
-        ["--with-browser", "--json"],
+        "clipy setup [claude|codex|cursor|windsurf|opencode] [--with-browser] [--no-plugins] [--json]",
+        "Wire Clipy into one coding agent in a single command: sign in if needed, install the bundled skill, and register the MCP server in that agent's own config (`claude`/`codex` through their own `mcp add`; `cursor`/`windsurf`/`opencode` by merging their JSON config, never replacing other servers). Omit the agent to auto-detect from the environment — ambiguous or unknown exits 2 rather than guessing. Re-running is safe. Successful --json output is {ok:true, target, skill:{installed,path}, mcp:{method,path,changed,alreadyPresent}, authenticated:true, restartRequired:true}. Failures use {ok:false,code,error,remediation,partial}; partial.mcp.method 'manual' means the caller must run partial.mcp.command or paste partial.mcp.snippet before setup is complete. The MCP server is read at agent startup, so the calling session will not see the tools until it restarts. --with-browser additionally provisions Chrome for Clipy, the agent-owned automation browser (see chrome): on macOS it installs the launcher app once, then it starts the instance. Its outcome is reported under a `browser` key ({ok, chrome:{appInstalled, appPath?, running, error?}}) and a browser failure never fails core setup. For claude, setup also adds the Clipy plugin marketplace (clipy-recorder/clipy) and installs its plugins at user scope (/record: record the screen and hand the AREC to Claude; /watch: watch a video; clipy-record: a Record button above the prompt) through Claude Code's own `claude plugin` commands; --no-plugins skips this. Its outcome is reported under a `plugins` key ({ok, marketplace:{added,error?}, plugins:[{name,installed,alreadyInstalled,error?}], command?}), `command` being what to run by hand, and a plugin failure never fails core setup.",
+        ["--with-browser", "--no-plugins", "--json"],
       ),
       cmdDoc("agents", "clipy agents <status|install|uninstall> <claude|codex|cursor|windsurf|opencode>", "Skill file only — does NOT register MCP. `clipy setup` is the one-command form; install triggers a browser login first when no key is configured (interactive terminals only)"),
       cmdDoc(
@@ -8847,6 +8878,7 @@ async function main(): Promise<void> {
       paste: { type: "boolean", default: false },
       "no-browser": { type: "boolean", default: false },
       "with-browser": { type: "boolean", default: false },
+      "no-plugins": { type: "boolean", default: false },
       port: { type: "string" },
       foreground: { type: "boolean", default: false },
       "api-url": { type: "string" },
@@ -9436,7 +9468,7 @@ async function main(): Promise<void> {
       await cmdPlaywrightPath(json);
       return;
     case "setup":
-      await cmdSetup(ctx, rest[0], json, values["with-browser"] === true);
+      await cmdSetup(ctx, rest[0], json, values["with-browser"] === true, values["no-plugins"] !== true);
       return;
     case "chrome":
       await cmdChrome(rest[0], json, values.port as string | undefined, values.foreground === true);

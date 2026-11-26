@@ -24,6 +24,33 @@ export interface SetupEnv {
 
 export type McpMethod = "agent-cli" | "config-file" | "manual";
 
+/** Claude Code plugins `clipy setup claude` installs from the Clipy marketplace. */
+export const CLIPY_MARKETPLACE_SOURCE = "clipy-recorder/clipy";
+export const CLIPY_MARKETPLACE_NAME = "clipy";
+export const CLIPY_PLUGINS = ["record", "watch", "clipy-record"] as const;
+
+/** How the setup summary names each plugin: a slash command, or the button. */
+export const CLIPY_PLUGIN_LABELS: Record<(typeof CLIPY_PLUGINS)[number], string> = {
+  record: "/record",
+  watch: "/watch",
+  "clipy-record": "the Record button",
+};
+
+export interface PluginInstall {
+  name: string;
+  installed: boolean;
+  alreadyInstalled: boolean;
+  error?: string;
+}
+
+export interface PluginSetup {
+  ok: boolean;
+  marketplace: { added: boolean; error?: string };
+  plugins: PluginInstall[];
+  /** What to run by hand when something did not install. */
+  command?: string;
+}
+
 export interface McpRegistration {
   method: McpMethod;
   path: string | null;

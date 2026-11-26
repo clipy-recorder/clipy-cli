@@ -15,7 +15,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const {
+  CLIPY_PLUGINS,
   detectSetupTarget,
+  installClaudePlugins,
   isSetupTarget,
   mcpSnippetFor,
   registerMcpServer,
@@ -450,6 +452,78 @@ test("an over-long row is clipped, not allowed to blow out the box", () => {
   const widths = new Set(lines.map((l) => [...l].length));
   assert.equal(widths.size, 1);
   assert.ok([...widths][0] < 100, "box must stay terminal-sized");
+});
+
+// --- Claude Code plugins ----------------------------------------------------
+
+const json = (value) => `${JSON.stringify(value)}\n`;
+
+test("claude setup adds the Clipy marketplace and installs /record and /watch", async () => {
+  const calls = [];
+  const env = makeEnv({
+    run: async (command, args) => {
+      calls.push([command, ...args].join(" "));
+      if (args[1] === "marketplace") return { code: 0, stdout: json({ outcome: "ok", marketplace: "clipy" }), stderr: "" };
+      return { code: 0, stdout: json({ outcome: "ok", message: `Successfully installed plugin: ${args[2]}` }), stderr: "" };
+    },
+  });
+  const result = await installClaudePlugins(env);
+  assert.equal(result.ok, true);
+  assert.deepEqual(CLIPY_PLUGINS, ["record", "watch", "clipy-record"]);
+  assert.deepEqual(calls, [
+    "claude plugin marketplace add clipy-recorder/clipy --json",
+    "claude plugin install record@clipy --scope user --json",
+    "claude plugin install watch@clipy --scope user --json",
+    "claude plugin install clipy-record@clipy --scope user --json",
+  ]);
+  assert.deepEqual(result.plugins.map((p) => [p.name, p.installed, p.alreadyInstalled]), [
+    ["record", true, false],
+    ["watch", true, false],
+    ["clipy-record", true, false],
+  ]);
+  assert.equal(result.command, undefined);
+});
+
+test("re-running setup reports plugins already installed, not failed", async () => {
+  const env = makeEnv({
+    run: async (_command, args) => ({
+      code: 0,
+      stdout: args[1] === "marketplace"
+        ? json({ outcome: "ok", message: "Marketplace 'clipy' already on disk" })
+        : json({ outcome: "ok", message: `Plugin "${args[2]}" is already installed (scope: user)` }),
+      stderr: "",
+    }),
+  });
+  const result = await installClaudePlugins(env);
+  assert.equal(result.ok, true);
+  assert.ok(result.plugins.every((p) => p.installed && p.alreadyInstalled));
+});
+
+test("a plugin that fails is reported with the command to run by hand", async () => {
+  const env = makeEnv({
+    run: async (_command, args) => {
+      if (args[1] === "marketplace") return { code: 0, stdout: json({ outcome: "ok" }), stderr: "" };
+      if (args[2] === "watch@clipy") {
+        return { code: 1, stdout: json({ outcome: "failed", message: 'Plugin "watch" not found in marketplace "clipy"' }), stderr: "" };
+      }
+      return { code: 0, stdout: json({ outcome: "ok", message: "Successfully installed" }), stderr: "" };
+    },
+  });
+  const result = await installClaudePlugins(env);
+  assert.equal(result.ok, false);
+  assert.equal(result.plugins[0].installed, true);
+  assert.match(result.plugins[1].error, /not found in marketplace/);
+  assert.match(result.command, /^claude plugin marketplace add clipy-recorder\/clipy && claude plugin install record@clipy/);
+});
+
+test("without the claude command, nothing throws and the manual command is given", async () => {
+  const env = makeEnv({ run: async () => ({ code: -1, stdout: "", stderr: "", spawnError: "spawn claude ENOENT" }) });
+  const result = await installClaudePlugins(env);
+  assert.equal(result.ok, false);
+  assert.equal(result.marketplace.added, false);
+  assert.match(result.marketplace.error, /not on PATH/);
+  assert.ok(result.plugins.every((p) => !p.installed));
+  assert.ok(result.command.includes("claude plugin install watch@clipy"));
 });
 
 let failed = 0;

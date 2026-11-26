@@ -1,6 +1,6 @@
 {
   "name": "@clipy/cli",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "description": "Command-line interface for Clipy, the AI-native screen recorder: list, search, and read your screen recordings' transcripts, AI summaries, and key moments from the terminal.",
   "license": "MIT AND Apache-2.0",
   "type": "module",
